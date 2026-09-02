@@ -1,0 +1,17 @@
+# 本地开发 overlay：在 dsh 源码 checkout 根目录运行
+#
+#   pnpm dsh web --patch /Users/apple/Documents/dsh/dsh-plugin-cost/dev/cordis.yml --no-open --port 3081
+#
+# 插件路径必须为【绝对路径】（overlay 不改变 profile 的模块解析目录）。
+#
+# 限制：overlay 只加载宿主半身（模块解析到源码文件，client-modules 按包名
+# 解析 package.json，发现不了 dsh.client 包级声明）。
+# 要测试浏览器半身（src/client/），必须把包【安装进 profile】：
+#   pnpm dsh plugin --profile web add /Users/apple/Documents/dsh/dsh-plugin-cost
+#   pnpm dsh web   # client 插件集合变更需重启生效
+- insert:
+    - id: cost
+      name: '/Users/apple/Documents/dsh/dsh-plugin-cost/src/index.ts'
+      config:
+        peakMode: auto
+        defaultModel: deepseek-v4-flash

@@ -1,0 +1,31 @@
+# bundle 的配置层（由 package.json 的 dsh.bundle.patch 引用）。
+# 本包被 `dsh plugin --profile <name> add <本包路径>` 安装进 profile 后，
+# 这一层会按 profile 的 bundles 列表顺序叠加到 dsh-base 之上。
+# 与 --patch overlay 不同，这里按【包名】引用插件模块，
+# Node 才能从 profile 的 node_modules 找到已安装的代码。
+#
+# 主行（cost）既承载宿主插件（注册 'cost' projection），也承载浏览器半身——
+# client-modules 扫描到该 entry 的包声明 dsh.client 后，会自动把 lib/client.js
+# 加进浏览器启动图，无需额外的 client 行。
+#
+# 价格默认取自官网《模型 & 价格》的高峰价（元/百万 token），空闲时段自动半价；
+# 官网调价后，只需改下面 config.prices 的数值，无需改代码。
+- insert:
+    - id: cost
+      name: 'dsh-plugin-cost'
+      config:
+        prices:
+          deepseek-v4-flash:
+            cacheHit: 0.10
+            cacheMiss: 3.0
+            output: 9.0
+          deepseek-v4-pro:
+            cacheHit: 0.30
+            cacheMiss: 9.0
+            output: 27.0
+          deepseek-v4-flash-vision-exp:
+            cacheHit: 0.10
+            cacheMiss: 3.0
+            output: 9.0
+        peakMode: auto
+        defaultModel: deepseek-v4-flash
