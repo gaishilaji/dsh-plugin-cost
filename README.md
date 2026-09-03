@@ -2,9 +2,6 @@
 
 ## 安装
 
-已发布到 npm：**`dsh-plugin-cost@0.1.1`**（源码托管在
-[gaishilaji/dsh-plugin-cost](https://github.com/gaishilaji/dsh-plugin-cost)）。
-
 **方式一：从 npm 安装（推荐）** —— 安装的是带构建产物的包，无需任何构建授权：
 
 ```sh
@@ -23,23 +20,11 @@ dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
 pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
 ```
 
-安装完成后**重启 `dsh web`** 生效（bundle/客户端插件集合变化不热应用）。
+安装完成后**重启 `dsh web`** 生效
 
-> **pnpm ≥10 的构建授权**（仅 Git 方式需要）：git 安装拉取的是源码，pnpm 默认拒绝
-> 运行 git 依赖的 `prepare` 脚本——首次安装会失败并打印 `allowBuilds` 提示，把提示的
-> 包键写进该 profile 的 `pnpm-workspace.yaml` 后重试：
->
-> ```yaml
-> allowBuilds:
->   dsh-plugin-cost: true
-> ```
->
-> 建议锁定 commit：`github:gaishilaji/dsh-plugin-cost#<commit-sha>`。
+## 简介
 
-> 备选分发（无需构建授权）：`pnpm pack` 出 tarball 后
-> `dsh plugin --profile web add ./dsh-plugin-cost-0.1.1.tgz`。
-
-把每个会话的 token 用量与费用实时展示在 Web UI 里，并且可以设置限额提示：
+每个会话的 token 用量与费用实时展示在 Web UI 里，并且可以设置限额提示：
 
 - **每轮汇总**：每轮消息操作条（与内置的"耗时 / TTFT / tok/s"同排）上显示
   `本轮总消费 ¥0.0987` —— 该轮**全部**模型调用的合计（一轮 agent 执行会产生多条
@@ -96,26 +81,6 @@ dsh-plugin-cost/
 │       ├── index.tsx     # 浏览器：input.dock 动态本轮/限额行 + assistant-actions 汇总芯片/浮层 + composer.dock 总消费
 │       └── settings-card.tsx  # 浏览器：Plugins → 配置 页的每轮限额设置卡
 └── test/smoke.mjs        # 峰谷/单价核对 + 宿主契约 + client 握手验证
-```
-
-## 开发与验证
-
-```sh
-pnpm install
-pnpm typecheck && pnpm test     # test = build + smoke（含官网价格核对断言）
-```
-
-本地快速试宿主半身（在 dsh checkout 根）：
-
-```sh
-pnpm dsh web --patch /Users/apple/Documents/dsh/dsh-plugin-cost/dev/cordis.yml --no-open --port 3081
-```
-
-浏览器半身需安装进 profile（client 插件集合变更后重启生效）：
-
-```sh
-pnpm dsh plugin --profile web add /Users/apple/Documents/dsh/dsh-plugin-cost
-pnpm dsh web
 ```
 
 ## 工作原理（dsh 机制速览）
