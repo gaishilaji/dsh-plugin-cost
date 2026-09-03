@@ -103,7 +103,7 @@ const exported = captured.factory((spec) => {
 })
 assert(exported.inject.includes('slots'), 'client inject 应包含 "slots"')
 assert(typeof exported.apply === 'function', 'client 缺少 apply')
-assert([...externals].every((s) => ['react', 'react/jsx-runtime'].includes(s)), `意外的 external: ${[...externals]}`)
+assert([...externals].every((s) => ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'].includes(s)), `意外的 external: ${[...externals]}`)
 console.log('✅ lib/client.js: id / inject / apply 正确，externals =', [...externals].join(', '))
 
 console.log('✅ 冒烟测试全部通过')
