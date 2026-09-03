@@ -9,6 +9,11 @@
   - **对话费用（本条回复）**：该轮最后那条可见回复自身的费用；
   - **调用明细**：逐条列出该轮每一步：`#步序 时刻 文本/工具名 入·缓存读·出 ¥费用`；
   - **本轮合计**：入/缓存读/出 tokens 与金额，和总账严格对齐；
+- **每轮限额（可选，默认关闭）**：在 Web 设置（本插件设置卡）或 `cordis.patch.yml`
+  的 `config.budget` 里启用后——
+  - agent **运行中**：输入框上方整行区动态显示 `本轮 ¥0.34 / 限额 ¥1.00`
+    （每完成一步步进更新）；**超限变红**并提示"已超本轮限额"；对话结束自动隐藏；
+  - 每轮结束后：该轮"本轮总消费"**芯片标红** + `⚠`，hover 浮层内注明已超限额；
 - **输入框下方读数带**：常驻显示 `总消费 ¥X · 输入 N · 输出 M`（本会话累计，口径不变）。
 
 费用按 DeepSeek 官方刊例价（[《模型 & 价格》](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)）
@@ -41,11 +46,13 @@ dsh 的 usage 字段是 disjoint 计数（`llm-deepseek` adapter：缓存读从�
 dsh-plugin-cost/
 ├── package.json          # dsh.bundle + dsh.client；peer/dev 依赖；scripts
 ├── tsdown.config.ts      # 宿主 ESM 库 + 浏览器 CJS bundle 两段构建
-├── cordis.patch.yml      # bundle 配置层（价格表、峰谷策略在此配置）
+├── cordis.patch.yml      # bundle 配置层（价格表、峰谷、限额在此配置）
 ├── dev/cordis.yml        # 开发期 --patch overlay（只加载宿主半身）
 ├── src/
-│   ├── index.ts          # 宿主：投影 'cost'（每条消息费用 + turn/step 坐标 + 会话累计）
-│   └── client/index.tsx  # 浏览器：assistant-actions（单条费用 + 每轮汇总芯片/hover 明细）+ composer.dock 总消费
+│   ├── index.ts          # 宿主：cost 投影（计费 + turn/step + 当前轮 + 限额下发/settings 注册）
+│   └── client/
+│       ├── index.tsx     # 浏览器：input.dock 动态本轮/限额行 + assistant-actions 汇总芯片/浮层 + composer.dock 总消费
+│       └── settings-card.tsx  # 浏览器：Plugins → 配置 页的每轮限额设置卡
 └── test/smoke.mjs        # 峰谷/单价核对 + 宿主契约 + client 握手验证
 ```
 
@@ -71,19 +78,30 @@ pnpm dsh web
 
 ## 工作原理（dsh 机制速览）
 
-- 宿主侧：监听 `session/event`，从 `assistant/message` 事件的 `usage`（provider 真实 token 用量）
-  按消息 id 折叠出费用明细，注册为名为 `cost` 的 **projection**（`ctx.sessionProjections.register`）；
-- 浏览器侧：`useProjection('cost')` 订阅宿主推送，在两个槽位渲染——
-  `conversation.chat.assistant-actions`（每条消息操作条）与 `conversation.composer.dock`（输入框下读数带）；
+- 宿主侧：从会话事件流按消息 id 折叠费用明细，注册为名为 `cost` 的 **projection**
+  （`ctx.sessionProjections.register`）；用 `turn/start`、`turn/end` 维护"当前轮"
+  （openTurn）；并把**当前生效的每轮限额**作为 wire 视图附加字段随帧下发；
+- 限额是**双份源**：`cordis.patch.yml` 的 `config.budget` 是默认/部署层；Web 设置里
+  本插件在 Plugins → 配置 页的设置卡（`settings.plugin.item`，键=`dsh-plugin-cost`）
+  通过 `settingsScope` 写 `settings.yaml` 的 user 层覆盖。宿主用
+  `installSettingsSection` 注册命名空间——保存后无需重启，下一轮/下一步生效
+  （settings 服务缺席的环境自动退化为纯 config）；
+- 浏览器侧：`useProjection('cost')` 订阅宿主推送，渲染三处——
+  `conversation.input.dock`（运行中本轮/限额动态行）、
+  `conversation.chat.assistant-actions`（每轮总消费芯片与 hover 明细）、
+  `conversation.composer.dock`（总消费读数带）；
 - 宿主侧 `inject: ['sessionProjections']`、浏览器侧 `inject: ['slots']`：Cordis 的"未声明即访问"契约。
 
-## 配置项（cordis.patch.yml / config 块）
+## 配置项（cordis.patch.yml / config 块 / Web 设置卡）
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `prices` | 上表 | `{ [model]: { cacheHit, cacheMiss, output } }`，高峰价（元/百万） |
 | `peakMode` | `auto` | `auto` 按北京时间分时；`peak` 恒高峰；`off-peak` 恒空闲 |
 | `defaultModel` | `deepseek-v4-flash` | message 读不到模型名时的兜底 |
+| `budget.enabled` | `false` | 是否启用每轮消费限额（Web 设置卡可改） |
+| `budget.perTurn` | `1` | 每轮消费上限（元，≥0）（Web 设置卡可改） |
+| `budget.mode` | `'warn'` | 超限行为：`'warn'` 仅提示（`'ask'` 询问预留，未实现） |
 
 ## 已知边界
 
