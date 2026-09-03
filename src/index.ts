@@ -20,6 +20,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { z } from 'zod'
 // Type-only：让 SessionProjectionStateMap / SessionProjectionMap 认识 'cost' 键
 // （编译期擦除，不产生运行时依赖）。
@@ -64,7 +65,36 @@ export interface Config {
   peakMode: 'auto' | 'peak' | 'off-peak'
   /** message 未带 model 时兜底使用的模型名。 */
   defaultModel: string
+  /** 每轮消费限额（默认关闭；可在 Web 设置里改，双份源：schema 默认 + user 层覆盖）。 */
+  budget: BudgetConfig
 }
+
+/** 每轮消费限额配置。mode 保留给后续的"超限询问"档位；当前实现只走 'warn'。 */
+export interface BudgetConfig {
+  /** 是否启用每轮限额。 */
+  enabled: boolean
+  /** 每轮消费上限（元）。 */
+  perTurn: number
+  /** 超限行为：'warn'=仅提示（当前）；'ask' 预留。 */
+  mode: 'warn' | 'ask'
+}
+
+/** 下发到浏览器的限额视图（wire view 附加字段，读取当前生效值）。 */
+export interface BudgetView extends BudgetConfig {}
+
+/** Web 设置 section 的扁平字段（settingsScope 只支持单段字段路径）。 */
+export interface BudgetSection {
+  enabled: boolean
+  perTurn: number
+}
+
+/** Web 设置里限额的命名空间。 */
+export const COST_NS = settingsNamespace('dsh-plugin-cost')
+
+const budgetSectionSchema = Schema.object({
+  enabled: Schema.boolean().default(false),
+  perTurn: Schema.number().min(0).default(1),
+})
 
 export const Config: Schema<Config> = Schema.object({
   prices: Schema.dict(Schema.object({
@@ -74,6 +104,11 @@ export const Config: Schema<Config> = Schema.object({
   })).default(DEFAULT_PRICES),
   peakMode: Schema.union(['auto', 'peak', 'off-peak']).default('auto'),
   defaultModel: Schema.string().default('deepseek-v4-flash'),
+  budget: Schema.object({
+    enabled: Schema.boolean().default(false),
+    perTurn: Schema.number().min(0).default(1),
+    mode: Schema.union(['warn', 'ask']).default('warn'),
+  }).default({ enabled: false, perTurn: 1, mode: 'warn' }),
 })
 
 // ============================================================================
@@ -178,10 +213,12 @@ export interface CostTotals {
   messages: number
 }
 
-/** projection 的宿主状态（= wire 视图，无需转换）。 */
+/** projection 的宿主状态。 */
 export interface CostState {
   totals: CostTotals
   messages: Record<string, CostMessage>
+  /** 当前打开（进行中）的轮次；空闲为 null。由 turn/start、turn/end 维护。 */
+  openTurn: number | null
 }
 
 const emptyTotals = (): CostTotals => ({ input: 0, cacheRead: 0, output: 0, cost: 0, messages: 0 })
@@ -200,30 +237,50 @@ const costMessageSchema = z.object({
   tools: z.array(z.string()),
 }).strict()
 
+const costTotalsSchema = z.object({
+  input: z.number().int().nonnegative(),
+  cacheRead: z.number().int().nonnegative(),
+  output: z.number().int().nonnegative(),
+  cost: z.number().nonnegative(),
+  messages: z.number().int().nonnegative(),
+}).strict()
+
 const costStateSchema = z.object({
-  totals: z.object({
-    input: z.number().int().nonnegative(),
-    cacheRead: z.number().int().nonnegative(),
-    output: z.number().int().nonnegative(),
-    cost: z.number().nonnegative(),
-    messages: z.number().int().nonnegative(),
-  }).strict(),
+  totals: costTotalsSchema,
   messages: z.record(z.string(), costMessageSchema),
+  openTurn: z.number().int().nonnegative().nullable(),
 }).strict()
 
 type CostStateInferred = z.infer<typeof costStateSchema>
+
+/** wire 视图 = 宿主状态 + 当前生效的限额（随设置变更即时刷新）。 */
+const costViewSchema = z.object({
+  totals: costTotalsSchema,
+  messages: z.record(z.string(), costMessageSchema),
+  openTurn: z.number().int().nonnegative().nullable(),
+  budget: z.object({
+    enabled: z.boolean(),
+    perTurn: z.number().nonnegative(),
+    mode: z.string(),
+  }).strict(),
+}).strict()
+
+/** 浏览器侧拿到的完整视图类型（状态 + 当前限额）。 */
+export type CostView = z.infer<typeof costViewSchema>
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     cost: CostStateInferred
   }
   interface SessionProjectionMap {
-    cost: CostState
+    cost: CostView
   }
 }
 
-/** 组装投影单元：apply 为纯 fold，闭包只引用启动期确定的 config。导出以便测试。 */
-export function makeProjection(config: Config) {
+/** 组装投影单元：apply 为纯 fold，闭包只引用启动期确定的 config。
+ *  `readBudget` 在每次产出 wire 视图时读取【当前生效】的限额
+ *  （Web 设置保存后无需重启即反映到浏览器）。导出以便测试。 */
+export function makeProjection(config: Config, readBudget: () => BudgetView = () => config.budget) {
   const fallbackModel = config.defaultModel
   const isPeak = (time: number): boolean => {
     if (config.peakMode === 'peak') return true
@@ -233,10 +290,21 @@ export function makeProjection(config: Config) {
 
   return {
     key: 'cost',
-    stateVersion: 2,
+    stateVersion: 3,
     stateSchema: costStateSchema,
-    init: () => ({ totals: emptyTotals(), messages: {} }),
+    init: (): CostStateInferred => ({ totals: emptyTotals(), messages: {}, openTurn: null }),
     apply: (state: CostStateInferred, event: SessionEvent): CostStateInferred => {
+      // 轮次边界：turn/start 打开当前轮、turn/end 关闭。维护 openTurn 除了
+      // 给"本轮"显示提供语义，也让轮次切换时产生新的状态引用、从而把
+      // 最新的限额（view 附加字段）随帧推给浏览器。
+      if (event.type === 'turn/start') {
+        if (state.openTurn === event.data.turn) return state
+        return { ...state, openTurn: event.data.turn }
+      }
+      if (event.type === 'turn/end') {
+        if (state.openTurn !== event.data.turn) return state
+        return { ...state, openTurn: null }
+      }
       if (event.type !== 'assistant/message' || event.data.usage === undefined) return state
       const messageId = String(event.data.message.id ?? event.seq)
       // 已在状态中的消息（重放/重复）不重复计费。
@@ -270,6 +338,7 @@ export function makeProjection(config: Config) {
       const turn = (event.data as { turn?: number }).turn ?? 0
       const step = (event.data as { step?: number }).step ?? 0
       return {
+        ...state,
         totals,
         messages: {
           ...state.messages,
@@ -281,14 +350,34 @@ export function makeProjection(config: Config) {
       }
     },
     wire: {
-      viewSchema: costStateSchema,
-      view: (state) => state,
+      viewSchema: costViewSchema,
+      view: (state): CostView => ({ ...state, budget: readBudget() }),
     },
   } satisfies ProjectionDefinition<'cost', CostStateInferred>
 }
 
-/** 插件主体：注册 projection。所有注册都是 effect，随插件卸载自动回收。 */
+/** 插件主体：注册投影 + 把限额接入 Web 设置（settings 服务缺席时自动跳过）。 */
 export function apply(ctx: Context, config: Config) {
   console.log('[dsh-plugin-cost] 插件已加载，费用追踪开始')
-  ctx.sessionProjections.register(makeProjection(config))
+  // 当前生效的限额：初始取 composition entry（cordis.patch.yml 的 config.budget）；
+  // settings 服务存在时，注册 section 后由 resolved scope（base + user 层）驱动。
+  const current: { budget: BudgetView } = {
+    budget: { ...config.budget, mode: 'warn' },
+  }
+  let sectionSource: (() => BudgetSection) | null = null
+  installSettingsSection(ctx, COST_NS, budgetSectionSchema, {
+    enabled: config.budget.enabled,
+    perTurn: config.budget.perTurn,
+  }, {
+    setSource: (thunk) => { sectionSource = thunk },
+    onChange: () => {
+      const section = sectionSource === null ? null : sectionSource()
+      if (section !== null) {
+        // attach/detach/每次设置写入触发：用 resolved scope（user 层覆盖 base）
+        // 更新投影视图下发用的当前限额。
+        current.budget = { enabled: section.enabled, perTurn: section.perTurn, mode: 'warn' }
+      }
+    },
+  })
+  ctx.sessionProjections.register(makeProjection(config, () => current.budget))
 }
