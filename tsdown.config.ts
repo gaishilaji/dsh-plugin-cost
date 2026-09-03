@@ -23,10 +23,10 @@ const lib = {
 // 浏览器模块表只认识基线 externals（react、react/jsx-runtime、cordis、runtime、
 // ui-slots、ui-primitives…）与本包通过 dsh.client.external 请求的 specifier。
 // 其余依赖必须内联进 bundle，否则 require 会命中模块表回答不了的 specifier，
-// 工厂在浏览器里直接抛错。本插件的客户端示例只用 react + type-only 类型引用
-// （编译期擦除）。JSX 自动运行时（react/jsx-runtime）也是基线 external，必须一并
-// 列出，否则会被内联并在顶层访问 react 内部符号（ReactCurrentOwner）。
-const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime']
+// 工厂在浏览器里直接抛错。本插件的客户端只 import react 与平台 seed 词
+// ui-primitives（用于与内置卡一致的展开箭头图标）；JSX 自动运行时
+// （react/jsx-runtime）也是基线 external，必须一并列出。
+const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives']
 
 /** 浏览器半边：输出 lib/client.js。 */
 const client = {
