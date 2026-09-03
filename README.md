@@ -2,9 +2,19 @@
 
 ## 安装
 
-源码托管在 GitHub：[gaishilaji/dsh-plugin-cost](https://github.com/gaishilaji/dsh-plugin-cost)。
+已发布到 npm：**`dsh-plugin-cost@0.1.1`**（源码托管在
+[gaishilaji/dsh-plugin-cost](https://github.com/gaishilaji/dsh-plugin-cost)）。
 
-**从 Git 安装**（开发/尝鲜；安装时 pnpm 会运行包的 `prepare` 从源码构建，见下方授权说明）：
+**方式一：从 npm 安装（推荐）** —— 安装的是带构建产物的包，无需任何构建授权：
+
+```sh
+# npm 安装版 dsh：
+dsh plugin --profile web add dsh-plugin-cost
+# 源码 checkout 形态（在 dsh 仓库根目录）：
+pnpm dsh plugin --profile web add dsh-plugin-cost
+```
+
+**方式二：从 Git 安装**（开发/尝鲜；安装时 pnpm 会运行包的 `prepare` 从源码构建，见下方授权说明）：
 
 ```sh
 # npm 安装版 dsh：
@@ -15,9 +25,9 @@ pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
 
 安装完成后**重启 `dsh web`** 生效（bundle/客户端插件集合变化不热应用）。
 
-> **pnpm ≥10 的构建授权**：git 安装拉取的是源码，pnpm 默认拒绝运行 git 依赖的
-> `prepare` 脚本——首次安装会失败并打印 `allowBuilds` 提示，把提示的包键写进
-> 该 profile 的 `pnpm-workspace.yaml` 后重试：
+> **pnpm ≥10 的构建授权**（仅 Git 方式需要）：git 安装拉取的是源码，pnpm 默认拒绝
+> 运行 git 依赖的 `prepare` 脚本——首次安装会失败并打印 `allowBuilds` 提示，把提示的
+> 包键写进该 profile 的 `pnpm-workspace.yaml` 后重试：
 >
 > ```yaml
 > allowBuilds:
@@ -27,8 +37,7 @@ pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
 > 建议锁定 commit：`github:gaishilaji/dsh-plugin-cost#<commit-sha>`。
 
 > 备选分发（无需构建授权）：`pnpm pack` 出 tarball 后
-> `dsh plugin --profile web add ./dsh-plugin-cost-0.1.0.tgz`；
-> npm 发布后也可直接 `dsh plugin --profile web add dsh-plugin-cost`（安装方式发布后补充）。
+> `dsh plugin --profile web add ./dsh-plugin-cost-0.1.1.tgz`。
 
 把每个会话的 token 用量与费用实时展示在 Web UI 里，并且可以设置限额提示：
 
