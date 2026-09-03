@@ -219,7 +219,24 @@ export interface CostState {
   messages: Record<string, CostMessage>
   /** 当前打开（进行中）的轮次；空闲为 null。由 turn/start、turn/end 维护。 */
   openTurn: number | null
+  /** 当前流式步骤的输出估算（usage 完成前，浏览器据此实时动起来）。 */
+  live: CostLive | null
 }
+
+/** 流式步骤的估算：按已流出的字符数 × 字符→token 系数 × 输出单价。 */
+export interface CostLive {
+  /** 所属轮次。 */
+  turn: number
+  /** 所属步序。 */
+  step: number
+  /** 已流式输出的字符数（reasoning + text + tool 参数）。 */
+  chars: number
+  /** 估算输出费用（元）；assistant/message 落账后以真实 usage 为准。 */
+  cost: number
+}
+
+/** 流式估算的字符→输出 token 近似系数（离线校准，中英混排约 3.2 字/token）。 */
+export const OUTPUT_CHARS_PER_TOKEN = 3.2
 
 const emptyTotals = (): CostTotals => ({ input: 0, cacheRead: 0, output: 0, cost: 0, messages: 0 })
 
@@ -245,10 +262,18 @@ const costTotalsSchema = z.object({
   messages: z.number().int().nonnegative(),
 }).strict()
 
+const costLiveSchema = z.object({
+  turn: z.number().int().nonnegative(),
+  step: z.number().int().nonnegative(),
+  chars: z.number().int().nonnegative(),
+  cost: z.number().nonnegative(),
+}).strict()
+
 const costStateSchema = z.object({
   totals: costTotalsSchema,
   messages: z.record(z.string(), costMessageSchema),
   openTurn: z.number().int().nonnegative().nullable(),
+  live: costLiveSchema.nullable(),
 }).strict()
 
 type CostStateInferred = z.infer<typeof costStateSchema>
@@ -258,6 +283,7 @@ const costViewSchema = z.object({
   totals: costTotalsSchema,
   messages: z.record(z.string(), costMessageSchema),
   openTurn: z.number().int().nonnegative().nullable(),
+  live: costLiveSchema.nullable(),
   budget: z.object({
     enabled: z.boolean(),
     perTurn: z.number().nonnegative(),
@@ -287,24 +313,47 @@ export function makeProjection(config: Config, readBudget: () => BudgetView = ()
     if (config.peakMode === 'off-peak') return false
     return isPeakHour(time)
   }
+  // 估算用的输出单价：流式中模型名未知，按 defaultModel（fallback）计价，
+  // 步骤完成拿到真实 usage 后由精确值覆盖，因此只影响"进行中"的观感。
+  const estimateOutputPrice = config.prices[fallbackModel]?.output ?? 0
 
   return {
     key: 'cost',
-    stateVersion: 3,
+    stateVersion: 4,
     stateSchema: costStateSchema,
-    init: (): CostStateInferred => ({ totals: emptyTotals(), messages: {}, openTurn: null }),
+    init: (): CostStateInferred => ({ totals: emptyTotals(), messages: {}, openTurn: null, live: null }),
     apply: (state: CostStateInferred, event: SessionEvent): CostStateInferred => {
       // 轮次边界：turn/start 打开当前轮、turn/end 关闭。维护 openTurn 除了
       // 给"本轮"显示提供语义，也让轮次切换时产生新的状态引用、从而把
       // 最新的限额（view 附加字段）随帧推给浏览器。
       if (event.type === 'turn/start') {
         if (state.openTurn === event.data.turn) return state
-        return { ...state, openTurn: event.data.turn }
+        return { ...state, openTurn: event.data.turn, live: null }
       }
       if (event.type === 'turn/end') {
         if (state.openTurn !== event.data.turn) return state
-        return { ...state, openTurn: null }
+        return { ...state, openTurn: null, live: null }
       }
+
+      // 流式估算：usage 只在步骤完成时落账，但思考/正文/工具参数逐块流式到达
+      // （assistant/chunk 的 reasoning-delta / text-delta / tool-call-delta）。
+      // 按累计字符数 × 字符→token 系数 × 输出单价得出"进行中步骤"的估算输出费，
+      // 让运行中的读数随思考实时上涨；assistant/message 落账后用真实 usage 顶替
+      // （见下）。每块 delta 一次小帧，与应用自身的流式转发同量级。
+      const streamed = streamedChars(event)
+      if (streamed !== null) {
+        if (streamed.n <= 0) return state
+        const open = state.live
+        const same = open !== null && open.turn === streamed.turn && open.step === streamed.step
+        const chars = (same ? open.chars : 0) + streamed.n
+        const rate = isPeak(event.time) ? 1 : 0.5
+        const cost = chars / OUTPUT_CHARS_PER_TOKEN / 1e6 * estimateOutputPrice * rate
+        return {
+          ...state,
+          live: { turn: streamed.turn, step: streamed.step, chars, cost },
+        }
+      }
+
       if (event.type !== 'assistant/message' || event.data.usage === undefined) return state
       const messageId = String(event.data.message.id ?? event.seq)
       // 已在状态中的消息（重放/重复）不重复计费。
@@ -340,6 +389,10 @@ export function makeProjection(config: Config, readBudget: () => BudgetView = ()
       return {
         ...state,
         totals,
+        // 该步已落账：清除同一步的流式估算（真实 usage 入账）。
+        live: state.live !== null && state.live.turn === turn && state.live.step === step
+          ? null
+          : state.live,
         messages: {
           ...state.messages,
           [messageId]: {
@@ -354,6 +407,33 @@ export function makeProjection(config: Config, readBudget: () => BudgetView = ()
       view: (state): CostView => ({ ...state, budget: readBudget() }),
     },
   } satisfies ProjectionDefinition<'cost', CostStateInferred>
+}
+
+/**
+ * 从流式事件提取 (turn, step, 字符增量)。非流式/非 delta 事件返回 null。
+ * 实时与重放吃的是同一种形态：每条 `assistant/chunk` 携带一个 chunk，其中
+ * reasoning-delta / text-delta / tool-call-delta 各携带一小段输出
+ * （text / argumentsDelta）。存储层会把连续 delta 打包成 chunk 行、重放时再
+ * 还原回本形态（见 core/session 的 chunk-rows），因此折叠只需处理原始事件。
+ */
+function streamedChars(event: SessionEvent): { turn: number; step: number; n: number } | null {
+  if (event.type !== 'assistant/chunk') return null
+  const raw = event as unknown as {
+    data?: {
+      turn?: number
+      step?: number
+      chunk?: { type?: string; text?: string; argumentsDelta?: string }
+    }
+  }
+  const chunk = raw.data?.chunk
+  if (chunk === undefined) return null
+  const kind = chunk.type
+  if (kind !== 'reasoning-delta' && kind !== 'text-delta' && kind !== 'tool-call-delta') {
+    return null
+  }
+  const piece = kind === 'tool-call-delta' ? chunk.argumentsDelta : chunk.text
+  if (piece === undefined) return null
+  return { turn: raw.data?.turn ?? 0, step: raw.data?.step ?? 0, n: piece.length }
 }
 
 /** 插件主体：注册投影 + 把限额接入 Web 设置（settings 服务缺席时自动跳过）。 */
