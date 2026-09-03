@@ -1,21 +1,22 @@
 /**
  * dsh-plugin-cost —— DeepSeek 对话消费追踪（浏览器半身）
  *
- * 读取宿主侧 projection 'cost'（见 src/index.ts），渲染两处：
+ * 读取宿主侧 projection 'cost'（见 src/index.ts）的 wire 视图
+ * （宿主状态 + 当前生效的每轮限额 budget），渲染三处：
  *
- *   1. conversation.chat.assistant-actions —— 每轮结束的 actions 条内
- *      （TurnTail，与内置"耗时 / TTFT / tok/s"同排）：
- *      每轮一个汇总芯片 `本轮总消费 ¥0.0987`（该轮全部模型调用合计，
- *      含纯工具调用、无文本气泡的步骤）。鼠标移上去（或点按）弹出明细浮层：
- *        - 对话费用：该轮最后那条可见回复（closing 消息）自身的费用；
- *        - 调用明细：逐条列出该轮每一步 ——
- *          #步序 时刻 文本/工具名 入·缓存读·出 tokens ¥费用；
- *        - 本轮合计。
- *      浮层可悬停（不会因光标移出芯片就消失），离开芯片与浮层后才关闭。
- *   2. conversation.composer.dock —— 输入框下方的总消费读数带（不变）。
+ *   1. conversation.input.dock —— 输入框上方整行区（deep-diving 所在聊天区
+ *      下方、输入卡上方，运行中用户视线常驻区域）：agent 运行中显示动态
+ *      `本轮 ¥0.34 / 限额 ¥1.00`，每完成一步步进更新；超限变红 + `已超本轮限额`。
+ *      对话结束（空闲）自动隐藏。
+ *   2. conversation.chat.assistant-actions —— 每轮结束的 actions 条内的
+ *      `本轮总消费 ¥X` 汇总芯片（含纯工具调用步骤；hover 弹出明细浮层：
+ *      对话费用 + 逐条调用详情 + 本轮合计）。该轮超限时芯片标红，
+ *      浮层里追加"已超本轮限额"提示行。浮层可悬停，不会移出即消失。
+ *   3. conversation.composer.dock —— 输入框下方总消费读数带（不变）。
  *
- * 轮次聚合完全来自投影状态：宿主在每条计费消息上记录 turn/step，客户端
- * 按 turn 分组，保证"所见即所扣"——浮层里列出的每一条都能在总账对上。
+ * 每轮限额（budget）是双份源：cordis.patch.yml 的 config.budget 做默认/部署层，
+ * Web 设置里本插件的设置卡（settings.plugin.item）写 settings.yaml user 层
+ * 覆盖，宿主随投影视图下发当前生效值（设置保存后下一轮/下一步生效）。
  *
  * 槽位注入的标准套件（PropsRuntime）会提供 useProjection / useSession /
  * sessionId；本组件不接触 ctx，数据全部来自 props。
@@ -24,11 +25,12 @@
  */
 
 import { memo, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { registerBudgetSettingsCard } from './settings-card.tsx'
 
 /** 浏览器侧插件同样声明依赖（服务名 'slots'）。 */
 export const inject = ['slots']
 
-/** 宿主 projection 'cost' 的 wire 视图（与 src/index.ts 的 CostState 一致）。 */
+/** 宿主投影 'cost' 的 wire 视图（= 状态 + 当前限额，见 src/index.ts）。 */
 interface CostMessage {
   input: number
   cacheRead: number
@@ -52,6 +54,12 @@ interface CostView {
     messages: number
   }
   messages: Record<string, CostMessage>
+  openTurn: number | null
+  budget: {
+    enabled: boolean
+    perTurn: number
+    mode: string
+  }
 }
 
 const fmt = (n: number): string => n.toLocaleString('zh-CN')
@@ -63,9 +71,19 @@ function formatMoney(n: number): string {
   return `¥${fixed}`
 }
 
+/** 限额行/警示用金额：固定两位小数（元）。 */
+function formatYuan(n: number): string {
+  return `¥${n.toFixed(2)}`
+}
+
+/** 主题里没有 danger 文本 token 时的兜底红。 */
+const DANGER = 'var(--dsw-alias-danger, #e5484d)'
+
 /** 最小 props 类型（正式项目可用 PropsRuntime<'...'> 推导完整套件）。 */
 interface SlotProps {
   useProjection: (key: string) => unknown
+  /** session 标准套件提供的钩子（仅按需读取 running 等快照字段）。 */
+  useSession?: (selector: (snapshot: Record<string, unknown>) => unknown) => unknown
 }
 
 interface AssistantActionsProps extends SlotProps {
@@ -89,7 +107,57 @@ function clock(ms: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// 展示位 1：每轮"本轮总消费"芯片 + hover 明细浮层（对话费用 + 调用详情）
+// 展示位 1：input.dock 动态"本轮消费/限额"行（agent 运行中显示，空闲隐藏）
+// ---------------------------------------------------------------------------
+
+export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useSession }: SlotProps) {
+  const running = useSession?.(s => s.running) === true
+  const view = useProjection('cost') as CostView | undefined
+  // 运行中 + 已启用限额才显示；空闲自动隐藏（本区域无内容时不占位）。
+  if (!running || view === undefined || !view.budget.enabled) return null
+  // 当前轮：优先用宿主维护的 openTurn（turn/start 到 turn/end 之间）；
+  // 兜底取已入账消息的最新轮。
+  let turn = view.openTurn
+  if (turn === null) {
+    for (const m of Object.values(view.messages)) {
+      if (turn === null || m.turn > turn) turn = m.turn
+    }
+    if (turn === null) return null
+  }
+  // 该轮已入账消息的费用合计（agent 每完成一步更新一次，步进式增长）。
+  let spend = 0
+  for (const m of Object.values(view.messages)) {
+    if (m.turn === turn) spend += m.cost
+  }
+  const over = spend > view.budget.perTurn
+  const color = over ? DANGER : 'var(--dsw-alias-label-secondary, #8a8f98)'
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        // 与 todo/queue 等 input.dock 卡片一致的水平几何：相对聊天内容列
+        // （--dsh-chat-content-width）居中，而不是从区域最左缘起。
+        boxSizing: 'border-box',
+        margin: '0 auto',
+        width: 'calc(100% - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset))',
+        maxWidth: 'calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset))',
+        fontSize: 12,
+        lineHeight: '18px',
+        color,
+        fontVariantNumeric: 'tabular-nums',
+        padding: '2px 0',
+      }}
+    >
+      {over && <span aria-hidden>⚠ </span>}
+      本轮 {formatYuan(spend)} / 限额 {formatYuan(view.budget.perTurn)}
+      {over && <span style={{ marginLeft: 6 }}>已超本轮限额</span>}
+    </div>
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 展示位 2：每轮"本轮总消费"芯片 + hover 明细浮层（对话费用 + 调用详情）
 // ---------------------------------------------------------------------------
 
 /** 离开芯片/浮层后关闭的容差（毫秒），避免光标在两者间移动时闪烁。 */
@@ -144,6 +212,8 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
   const modelLine = models.size === 1 ? [...models][0] : [...models].join(' / ')
   // closing 消息是"本条回复"（动作条所属的那条可见消息）。
   const dialogue = closing.cost
+  const overBudget = cost.budget.enabled && totalCost > cost.budget.perTurn
+  const overLimitNote = overBudget ? `（限额 ${formatYuan(cost.budget.perTurn)}）` : ''
 
   const cancelHide = () => {
     if (hideTimer.current !== null) {
@@ -176,7 +246,7 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
 
   const chipStyle: CSSProperties = {
     cursor: 'help',
-    color: 'var(--dsw-alias-label-secondary, #8a8f98)',
+    color: overBudget ? DANGER : 'var(--dsw-alias-label-secondary, #8a8f98)',
     fontVariantNumeric: 'tabular-nums',
   }
   const panelStyle: CSSProperties = {
@@ -210,6 +280,7 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
       onMouseLeave={scheduleHide}
       onClick={open ? hideNow : show}
     >
+      {overBudget && <span aria-hidden>⚠ </span>}
       本轮总消费 {formatMoney(totalCost)}
       {open && anchor !== null && (
         <div
@@ -222,6 +293,11 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
           <div style={{ fontSize: 12, lineHeight: '18px', opacity: 0.85 }}>
             第 {closing.turn} 轮 · {steps.length} 次模型调用 · {modelLine}
           </div>
+          {overBudget && (
+            <div style={{ fontSize: 12, lineHeight: '18px', marginTop: 2, color: DANGER }}>
+              ⚠ 已超本轮限额 {formatYuan(cost.budget.perTurn)}
+            </div>
+          )}
           {steps.length > 1 && dialogue > 0 && (
             <div
               style={{
@@ -233,7 +309,7 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
                 marginTop: 4,
               }}
             >
-              <span>对话费用（本条回复 #{closing.step}）</span>
+              <span>对话费用（本条回复 #{closing.step}）{overLimitNote}</span>
               <span style={{ opacity: 0.85 }}>{formatMoney(dialogue)}</span>
             </div>
           )}
@@ -295,7 +371,7 @@ export const TurnCostSummary = memo(function TurnCostSummary({ messageId, usePro
 })
 
 // ---------------------------------------------------------------------------
-// 展示位 2：会话总消费（输入框下方读数带，口径不变）
+// 展示位 3：会话总消费（输入框下方读数带，口径不变）
 // ---------------------------------------------------------------------------
 
 export const CostTotalBar = memo(function CostTotalBar({ useProjection }: SlotProps) {
@@ -330,11 +406,34 @@ export const CostTotalBar = memo(function CostTotalBar({ useProjection }: SlotPr
 /** 浏览器侧 slots API 的最小类型（正式项目按官方类型声明）。 */
 interface Slots {
   inject: (name: string, register: () => unknown) => void
-  register: (options: { name: string; id: string; order: number }, component: unknown) => unknown
+  register: (options: {
+    name: string
+    key?: string
+    id?: string
+    order?: number
+    inject?: () => Record<string, unknown>
+  }, component: unknown) => unknown
 }
 
-export function apply(ctx: { slots: unknown }): void {
+/** 客户端 ctx 的最小形状（只用到 slots + 可选服务注入）。 */
+interface ClientCtxLike {
+  slots: unknown
+  get?: (name: string) => unknown
+  /** cordis 服务注入：服务就绪后调用回调（浏览器插件的 apply 顺序无约束）。 */
+  inject?: (services: readonly string[], callback: (sctx: Record<string, unknown>) => unknown) => unknown
+}
+
+export function apply(ctx: ClientCtxLike): void {
   const slots = ctx.slots as Slots
+
+  // 输入框上方整行区：运行中动态"本轮消费/限额"行。
+  slots.inject('conversation.input.dock', () =>
+    slots.register({
+      name: 'conversation.input.dock',
+      id: 'cost-live-budget',
+      order: 5,
+    }, LiveBudgetLine),
+  )
 
   // 每轮汇总芯片（assistant-actions 只在每轮 closing 的 actions 条渲染一次，
   // 因此这里天然是"每轮下面"的位置）：本轮总消费 + hover 明细。
@@ -354,4 +453,34 @@ export function apply(ctx: { slots: unknown }): void {
       order: 30,
     }, CostTotalBar),
   )
+
+  // Web 设置卡。settingsScope 由其它浏览器插件（ui-settings）提供，而浏览器
+  // 插件的 apply 顺序无约束：若本插件先于它 apply，一次性 ctx.get 会拿到
+  // undefined 导致卡片永不注册。因此：
+  //   1) 先尝试立即拿服务（已就绪则直接注册）；
+  //   2) 再走 ctx.inject(['settingsScope'], …) 等服务就绪补注册（幂等：仅一次）。
+  // 服务始终缺席（如 headless 部署）时静默跳过，不影响上面的展示。
+  let registered = false
+  const tryRegister = (scopeService: unknown): void => {
+    if (registered) return
+    try {
+      if (registerBudgetSettingsCard(slots, scopeService)) registered = true
+    } catch (error) {
+      console.warn('[dsh-plugin-cost] 设置卡注册失败（不影响费用展示）', error)
+    }
+  }
+  try {
+    if (typeof ctx.inject === 'function') {
+      try {
+        ctx.inject(['settingsScope'], sctx => { tryRegister(sctx?.settingsScope) })
+      } catch {
+        // 注入不可用（旧客户端）→ 退回一次性 get
+        tryRegister(ctx.get?.('settingsScope'))
+      }
+    } else {
+      tryRegister(ctx.get?.('settingsScope'))
+    }
+  } catch (error) {
+    console.warn('[dsh-plugin-cost] 设置卡注册异常（不影响费用展示）', error)
+  }
 }
