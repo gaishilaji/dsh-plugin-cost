@@ -55,6 +55,12 @@ interface CostView {
   }
   messages: Record<string, CostMessage>
   openTurn: number | null
+  live: {
+    turn: number
+    step: number
+    chars: number
+    cost: number
+  } | null
   budget: {
     enabled: boolean
     perTurn: number
@@ -124,13 +130,21 @@ export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useS
     }
     if (turn === null) return null
   }
-  // 该轮已入账消息的费用合计（agent 每完成一步更新一次，步进式增长）。
+  // 该轮已入账消息的费用合计（agent 每完成一步更新一次，步进式增长）+
+  // 当前流式步骤的输出估算（宿主按已流出的字符估算，assistant/message 落账
+  // 后由真实 usage 顶替）。估算只影响运行中的读数，最终显示都用精确值。
   let spend = 0
   for (const m of Object.values(view.messages)) {
     if (m.turn === turn) spend += m.cost
   }
+  const live = view.live
+  const estimating = live !== null && live.turn === turn && live.cost > 0
+  if (estimating) spend += live.cost
   const over = spend > view.budget.perTurn
   const color = over ? DANGER : 'var(--dsw-alias-label-secondary, #8a8f98)'
+  // 流式估算的增量是万分位级别：两位小数会一直显示 ¥0.00，观感断裂。
+  // 运行中（含估算）用 4 位小数，让读数随思考实时动；停滞后回到两位。
+  const spendText = estimating || spend < 0.005 ? `¥${spend.toFixed(4)}` : formatYuan(spend)
   return (
     <div
       role="status"
@@ -150,7 +164,8 @@ export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useS
       }}
     >
       {over && <span aria-hidden>⚠ </span>}
-      本轮 {formatYuan(spend)} / 限额 {formatYuan(view.budget.perTurn)}
+      本轮 {estimating ? '≈' : ''}{spendText} / 限额 {formatYuan(view.budget.perTurn)}
+      {estimating && <span style={{ opacity: 0.75, marginLeft: 6 }}>（含流式估算）</span>}
       {over && <span style={{ marginLeft: 6 }}>已超本轮限额</span>}
     </div>
   )
