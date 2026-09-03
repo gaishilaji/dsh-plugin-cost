@@ -50,6 +50,11 @@
     "name": "jwj233",
     "email": "jwj233mail@163.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gaishilaji/dsh-plugin-cost.git"
+  },
+  "homepage": "https://github.com/gaishilaji/dsh-plugin-cost",
   "dependencies": {
     "@deepseek-ai/dsh-settings": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",

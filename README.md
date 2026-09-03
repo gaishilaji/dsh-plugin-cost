@@ -1,11 +1,41 @@
-# dsh-plugin-cost —— DeepSeek 对话消费追踪插件
+# dsh-plugin-cost —— DeepSeek 对话消费提示插件
 
-把每个会话的 token 用量与费用实时展示在 Web UI 里（**所见即所扣**）：
+## 安装
+
+源码托管在 GitHub：[gaishilaji/dsh-plugin-cost](https://github.com/gaishilaji/dsh-plugin-cost)。
+
+**从 Git 安装**（开发/尝鲜；安装时 pnpm 会运行包的 `prepare` 从源码构建，见下方授权说明）：
+
+```sh
+# npm 安装版 dsh：
+dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
+# 源码 checkout 形态（在 dsh 仓库根目录）：
+pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
+```
+
+安装完成后**重启 `dsh web`** 生效（bundle/客户端插件集合变化不热应用）。
+
+> **pnpm ≥10 的构建授权**：git 安装拉取的是源码，pnpm 默认拒绝运行 git 依赖的
+> `prepare` 脚本——首次安装会失败并打印 `allowBuilds` 提示，把提示的包键写进
+> 该 profile 的 `pnpm-workspace.yaml` 后重试：
+>
+> ```yaml
+> allowBuilds:
+>   dsh-plugin-cost: true
+> ```
+>
+> 建议锁定 commit：`github:gaishilaji/dsh-plugin-cost#<commit-sha>`。
+
+> 备选分发（无需构建授权）：`pnpm pack` 出 tarball 后
+> `dsh plugin --profile web add ./dsh-plugin-cost-0.1.0.tgz`；
+> npm 发布后也可直接 `dsh plugin --profile web add dsh-plugin-cost`（安装方式发布后补充）。
+
+把每个会话的 token 用量与费用实时展示在 Web UI 里，并且可以设置限额提示：
 
 - **每轮汇总**：每轮消息操作条（与内置的"耗时 / TTFT / tok/s"同排）上显示
   `本轮总消费 ¥0.0987` —— 该轮**全部**模型调用的合计（一轮 agent 执行会产生多条
   assistant 消息：文本回答 + 中间多次纯工具调用步骤，后者没有气泡但仍按 usage 计费）。
-  **悬停弹出明细浮层**（浮层可悬停，不会一移出芯片就消失）：
+  **悬停弹出明细浮层**：
   - **对话费用（本条回复）**：该轮最后那条可见回复自身的费用；
   - **调用明细**：逐条列出该轮每一步：`#步序 时刻 文本/工具名 入·缓存读·出 ¥费用`；
   - **本轮合计**：入/缓存读/出 tokens 与金额，和总账严格对齐；
@@ -14,15 +44,15 @@
   - agent **运行中**：输入框上方整行区动态显示 `本轮 ¥0.34 / 限额 ¥1.00`
     （**流式估算**：思考/正文/工具参数一边输出一边按字符估算、实时上涨，带 `≈`
     与"（含流式估算）"标记；每步完成即用真实 usage 校正——**最终显示一律是精确值**）；
-    **超限变红**并提示"已超本轮限额"；对话结束自动隐藏；
-  - 每轮结束后：该轮"本轮总消费"**芯片标红** + `⚠`，hover 浮层内注明已超限额（精确值）；
+    **超限变红**并提示"已超本轮限额"；对话结束自动隐藏；（流式因为拿不到token只能是估算值，但是在一轮对话中误差可以忽略不计）
+  - 每轮结束后：如果超限额，该轮"本轮总消费"**芯片标红**，hover 浮层内注明已超限额（精确值）；
 - **输入框下方读数带**：常驻显示 `总消费 ¥X · 输入 N · 输出 M`（本会话累计，口径不变）。
 
 费用按 DeepSeek 官方刊例价（[《模型 & 价格》](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)）
 实时计算，支持**分时定价**：高峰（北京时间周一至周五 9:00–12:00、14:00–18:00）按刊例价，
 空闲时段自动半价。
 
-## 计费口径
+## 计费
 
 dsh 的 usage 字段是 disjoint 计数（`llm-deepseek` adapter：缓存读从输入里剔除）：
 
@@ -30,6 +60,7 @@ dsh 的 usage 字段是 disjoint 计数（`llm-deepseek` adapter：缓存读从�
 费用 = 未命中输入 × miss单价 + 命中输入(cacheRead) × hit单价 + 输出 × 输出单价
 ```
 
+- 目前只支持deepseek模型计费。模型定价来源2026年8月。
 - 价格单位为 **元 / 百万 tokens**，配置里存的是**高峰价**，空闲自动 ×0.5；
 - 每条消息按其**发生时刻**（会话事件时间）判断峰谷 → 可重放、幂等；
 - 默认价格表（2026-08 官网快照，高峰价）：
