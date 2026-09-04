@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f22"/>
+      <stop offset="0.55" stop-color="#101736"/>
+      <stop offset="1" stop-color="#1b2350"/>
+    </linearGradient>
+    <linearGradient id="money" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6ee7ff"/>
+      <stop offset="0.5" stop-color="#7b9cff"/>
+      <stop offset="1" stop-color="#4d6bfe"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4d6bfe" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#4d6bfe" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- 背景与光斑 -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1150" cy="560" r="420" fill="url(#glowA)"/>
+  <circle cx="140" cy="90" r="260" fill="url(#glowB)"/>
+
+  <!-- 右上 token 流装饰 -->
+  <g opacity="0.9">
+    <rect x="1020" y="120" width="10" height="26" rx="5" fill="#4d6bfe" opacity="0.35"/>
+    <rect x="1042" y="100" width="10" height="46" rx="5" fill="#4d6bfe" opacity="0.5"/>
+    <rect x="1064" y="86" width="10" height="60" rx="5" fill="#6ee7ff" opacity="0.7"/>
+    <rect x="1086" y="116" width="10" height="30" rx="5" fill="#4d6bfe" opacity="0.4"/>
+    <rect x="1108" y="76" width="10" height="70" rx="5" fill="#7b9cff" opacity="0.65"/>
+    <rect x="1130" y="104" width="10" height="42" rx="5" fill="#6ee7ff" opacity="0.55"/>
+    <rect x="1152" y="132" width="10" height="14" rx="5" fill="#4d6bfe" opacity="0.3"/>
+    <text x="1182" y="120" fill="#6e7fa8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">tokens</text>
+  </g>
+
+  <!-- 顶部徽章（框宽 310 → 右缘 370；文字右缘≈355，右侧间隙≈15px） -->
+  <rect x="60" y="62" width="310" height="48" rx="24" fill="#4d6bfe" fill-opacity="0.16" stroke="#4d6bfe" stroke-opacity="0.55"/>
+  <circle cx="88" cy="86" r="7" fill="#6ee7ff"/>
+  <text x="106" y="93" fill="#9db8ff" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="21" font-weight="600">DeepSeek Harness 插件</text>
+
+  <!-- 主标题（70px 宽约 630px，右缘 < 748，不碰金额卡） -->
+  <text x="60" y="222" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="70" font-weight="700">dsh-plugin-cost</text>
+
+  <!-- 标签行（≈12 全角 × 32px = 384px，安全） -->
+  <text x="60" y="282" fill="#a8b8e0" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="32" font-weight="500">每轮 · 每会话 · 预算提醒</text>
+
+  <!-- 说明行（收短，22px） -->
+  <text x="60" y="330" fill="#6e7fa8" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="22">按官方高峰 / 空闲价自动计费 · 价格可配置</text>
+
+  <!-- 右中金额卡 -->
+  <rect x="748" y="150" width="472" height="226" rx="26" fill="#ffffff" fill-opacity="0.05" stroke="#4d6bfe" stroke-opacity="0.35"/>
+  <text x="788" y="202" fill="#8fb0ff" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="22">本轮消费</text>
+  <text x="784" y="298" fill="url(#money)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="92" font-weight="700">¥0.0987</text>
+  <text x="788" y="344" fill="#6e7fa8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">总消费 ¥12.34 · 输入 123,456</text>
+
+  <!-- 三个功能卡（y 428–524，右侧与金额卡不重叠） -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="60" y="436" width="252" height="92" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+    <text x="92" y="480" fill="#d8e2ff" font-size="23" font-weight="600">本轮费用</text>
+    <text x="92" y="508" fill="#6e7fa8" font-size="16">消息旁实时显示</text>
+
+    <rect x="332" y="436" width="252" height="92" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+    <text x="364" y="480" fill="#d8e2ff" font-size="23" font-weight="600">会话总账</text>
+    <text x="364" y="508" fill="#6e7fa8" font-size="16">输入输出累计常驻</text>
+
+    <rect x="604" y="436" width="252" height="92" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+    <text x="636" y="480" fill="#d8e2ff" font-size="23" font-weight="600">预算提醒</text>
+    <text x="636" y="508" fill="#6e7fa8" font-size="16">超限标红提示</text>
+  </g>
+
+  <!-- 底部 -->
+  <text x="60" y="600" fill="#4a5a80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">github.com/gaishilaji/dsh-plugin-cost · MIT</text>
+</svg>
