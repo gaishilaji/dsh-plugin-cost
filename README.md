@@ -1,71 +1,88 @@
-# dsh-plugin-cost —— DeepSeek 对话消费提示插件
+# dsh-plugin-cost
 
-## 安装
+> 给 DeepSeek Harness 的聊天界面装一个「账单显示器」——**每条回复花了多少钱、整场对话花了多少钱、有没有超预算**，全部实时显示，不用再自己去查用量。插件设置里开启限额提示后，对话进行会动态估算当前的消费。
 
-**方式一：从 npm 安装（推荐）** —— 安装的是带构建产物的包，无需任何构建授权：
+```
+┌ 聊天区																	     ┐
+│  AI: 正在工作....balabla................. 	│ 
+│  工具调用....                       				│
+└────────────────────────────────────────────┘
+输入框上方（开启限额时，且正在对话）： 本轮 ¥0.34（实时增长） / 限额 ¥1.00（流式估算，超过会标红）
+当前轮次结束后（常驻）：本轮总消费 ¥1.34（鼠标移入查看详情，包括工具调用）
+┌ 输入框   ───────────────────────────────────┐
+│ 给智能体发消息                        				│
+└────────────────────────────────────────────┘
+输入框下方（常驻）：  总消费 ¥1.2345 · 输入 12,345 · 输出 678
+```
+
+## ✨ 它能做什么
+
+- **每条回复下面**（和"耗时、tok/s"那排小字排在一起）多一个 **`本轮总消费 ¥0.0987`** 标签：
+  鼠标悬停可以看到**明细**——这条回复本身多少钱、中间每次调用（思考、查文件、跑命令…）各花了多少、合计多少；
+- **正在输入的那一栏下方**常驻显示：**`总消费 ¥X · 输入 N · 输出 M`**，整场对话的累计，随时瞄一眼就知道这轮聊了多少钱；
+- **（可选）预算提醒**：给每一轮设个"不能超过 ¥1"之类的上限，开着它的时候——
+  - 对话进行中，输入框上方会实时显示 **`本轮 ¥0.34 / 限额 ¥1.00`**，快超了会变红提醒；
+  - 超了预算的那一轮，费用标签也会标红，一眼看出哪轮"跑冒了"；
+- **自动按官方分时价计费**：DeepSeek 的"高峰时段"（工作日北京时间 9:00–12:00、14:00–18:00）价格翻倍，其余时间半价——插件会自动判断每条回复发生在高峰还是空闲。本计费只能作为估算，和具体扣费可能不符，但是对单轮次单会话来说，误差不大。
+- **价格写死前先问过你**：所有单价都存在配置文件里，官网调价后改一下数字就行，不用改插件（也可以等更新）。
+
+## 🚀 安装（三步）
 
 ```sh
-# npm 安装版 dsh：
-dsh plugin --profile web add dsh-plugin-cost
-# 源码 checkout 形态（在 dsh 仓库根目录）：
+# 1. 安装（在 dsh 源码目录下用 pnpm dsh，npm 安装版直接 dsh）
 pnpm dsh plugin --profile web add dsh-plugin-cost
+
+# 2. 重启 dsh web 生效
+pnpm dsh web
 ```
 
-**方式二：从 Git 安装**（开发/尝鲜；安装时 pnpm 会运行包的 `prepare` 从源码构建，见下方授权说明）：
+3. 打开聊天页随便聊一句 → 消息旁边和输入框下方就会显示费用。
 
-```sh
-# npm 安装版 dsh：
-dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
-# 源码 checkout 形态（在 dsh 仓库根目录）：
-pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost
-```
+> 想先试 Git 版也可以：`pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost`（首次安装会要求给该仓库的构建脚本授权，按提示操作）。
 
-安装完成后**重启 `dsh web`** 生效
+## 🤔 常见问题
 
-## 简介
+**Q：显示的价格准吗？**
+按官方价目表实时计算，展示的就是精确的 token 用量 × 单价（分时价自动处理）。极端情况下与实际账单可能有几分钱级舍入差异，以 DeepSeek 官方账单为准。开启限额后的流式估算会有一定误差，因为那个时候拿不到具体token消费，只能根据字符估算token，同样的在单轮次其误差忽略不计。
 
-每个会话的 token 用量与费用实时展示在 Web UI 里，并且可以设置限额提示：
+**Q：价格变了怎么办？**
+不用等插件更新——打开 dsh 的配置（`cordis.patch.yml`），找到 `config.prices` 改数字即可，改完生效。
 
-- **每轮汇总**：每轮消息操作条（与内置的"耗时 / TTFT / tok/s"同排）上显示
-  `本轮总消费 ¥0.0987` —— 该轮**全部**模型调用的合计（一轮 agent 执行会产生多条
-  assistant 消息：文本回答 + 中间多次纯工具调用步骤，后者没有气泡但仍按 usage 计费）。
-  **悬停弹出明细浮层**：
-  - **对话费用（本条回复）**：该轮最后那条可见回复自身的费用；
-  - **调用明细**：逐条列出该轮每一步：`#步序 时刻 文本/工具名 入·缓存读·出 ¥费用`；
-  - **本轮合计**：入/缓存读/出 tokens 与金额，和总账严格对齐；
-- **每轮限额（可选，默认关闭）**：在 Web 设置（本插件设置卡）或 `cordis.patch.yml`
-  的 `config.budget` 里启用后——
-  - agent **运行中**：输入框上方整行区动态显示 `本轮 ¥0.34 / 限额 ¥1.00`
-    （**流式估算**：思考/正文/工具参数一边输出一边按字符估算、实时上涨，带 `≈`
-    与"（含流式估算）"标记；每步完成即用真实 usage 校正——**最终显示一律是精确值**）；
-    **超限变红**并提示"已超本轮限额"；对话结束自动隐藏；（流式因为拿不到token只能是估算值，但是在一轮对话中误差可以忽略不计）
-  - 每轮结束后：如果超限额，该轮"本轮总消费"**芯片标红**，hover 浮层内注明已超限额（精确值）；
-- **输入框下方读数带**：常驻显示 `总消费 ¥X · 输入 N · 输出 M`（本会话累计，口径不变）。
+**Q：支持哪些模型？**
+目前内置 DeepSeek 各模型的价格表（见下）。其他模型会照常统计 token 用量，费用暂记 0，在价格表里补一行就能计费。
 
-费用按 DeepSeek 官方刊例价（[《模型 & 价格》](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)）
-实时计算，支持**分时定价**：高峰（北京时间周一至周五 9:00–12:00、14:00–18:00）按刊例价，
-空闲时段自动半价。
+---
 
-## 计费
+# 开发者文档
 
-dsh 的 usage 字段是 disjoint 计数（`llm-deepseek` adapter：缓存读从输入里剔除）：
+## 定价与计费口径
+
+按 [DeepSeek 官方《模型 & 价格》](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)（2026-08 快照）计价，单价单位为**元 / 百万 tokens**，配置存高峰价、空闲自动 ×0.5：
 
 ```
-费用 = 未命中输入 × miss单价 + 命中输入(cacheRead) × hit单价 + 输出 × 输出单价
+费用 = 未命中输入 × miss单价 + 缓存命中输入 × hit单价 + 输出 × 输出单价
 ```
-
-- 目前只支持deepseek模型计费。模型定价来源2026年8月。
-- 价格单位为 **元 / 百万 tokens**，配置里存的是**高峰价**，空闲自动 ×0.5；
-- 每条消息按其**发生时刻**（会话事件时间）判断峰谷 → 可重放、幂等；
-- 默认价格表（2026-08 官网快照，高峰价）：
 
 | 模型 | 输入·缓存命中 | 输入·缓存未命中 | 输出 |
 |---|---|---|---|
 | deepseek-v4-flash / v4-flash-vision-exp | ¥0.10 | ¥3.00 | ¥9.00 |
 | deepseek-v4-pro | ¥0.30 | ¥9.00 | ¥27.00 |
 
-> **价格会变**：官网调价后只需改 `cordis.patch.yml` 里 `config.prices` 的数值（无硬编码），
-> 或覆盖任意模型。未知模型仍记录用量、费用按 0（便于你补价目）。
+每条消息按其**发生时刻**判断峰谷（可重放、幂等）；同一消息重放不重复计费。
+
+## 配置项
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `prices` | 上表 | `{ [model]: { cacheHit, cacheMiss, output } }`，高峰价（元/百万） |
+| `peakMode` | `auto` | `auto` 按北京时间分时；`peak` 恒高峰；`off-peak` 恒空闲 |
+| `defaultModel` | `deepseek-v4-flash` | 读不到模型名时的兜底 |
+| `budget.enabled` | `false` | 是否启用每轮消费限额（也可在 Web 设置卡改） |
+| `budget.perTurn` | `1` | 每轮消费上限（元） |
+| `budget.mode` | `'warn'` | 超限行为：`'warn'` 仅提示（`'ask'` 预留，未实现） |
+
+限额可双通道配置：`cordis.patch.yml` 的 `config.budget`（部署默认层）或 Web 设置页
+Plugins → 本插件设置卡（用户层，写入 `settings.yaml` 后覆盖默认，保存即生效）。
 
 ## 项目结构
 
@@ -99,16 +116,25 @@ dsh-plugin-cost/
   `conversation.composer.dock`（总消费读数带）；
 - 宿主侧 `inject: ['sessionProjections']`、浏览器侧 `inject: ['slots']`：Cordis 的"未声明即访问"契约。
 
-## 配置项（cordis.patch.yml / config 块 / Web 设置卡）
+## 开发与验证
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `prices` | 上表 | `{ [model]: { cacheHit, cacheMiss, output } }`，高峰价（元/百万） |
-| `peakMode` | `auto` | `auto` 按北京时间分时；`peak` 恒高峰；`off-peak` 恒空闲 |
-| `defaultModel` | `deepseek-v4-flash` | message 读不到模型名时的兜底 |
-| `budget.enabled` | `false` | 是否启用每轮消费限额（Web 设置卡可改） |
-| `budget.perTurn` | `1` | 每轮消费上限（元，≥0）（Web 设置卡可改） |
-| `budget.mode` | `'warn'` | 超限行为：`'warn'` 仅提示（`'ask'` 询问预留，未实现） |
+```sh
+pnpm install
+pnpm typecheck && pnpm test     # test = build + smoke（含官网价格核对断言）
+```
+
+本地快速试宿主半身（在 dsh checkout 根）：
+
+```sh
+pnpm dsh web --patch /absolute/path/to/dsh-plugin-cost/dev/cordis.yml --no-open --port 3081
+```
+
+浏览器半身需安装进 profile（client 插件集合变更后重启生效）：
+
+```sh
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-plugin-cost
+pnpm dsh web
+```
 
 ## 已知边界
 
