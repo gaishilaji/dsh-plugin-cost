@@ -11,21 +11,21 @@
 <table>
   <tr>
     <td align="center">
-      <img src="docs/demo-streaming.gif" alt="对话进行中费用实时上涨" width="100%"><br>
+      <img src="https://raw.githubusercontent.com/gaishilaji/dsh-plugin-cost/main/docs/demo-streaming.gif" alt="对话进行中费用实时上涨" width="100%"><br>
       <sub>① 对话进行中：本轮费用 <b>实时上涨</b>，接近限额变红提醒</sub>
     </td>
     <td align="center">
-      <img src="docs/demo-turn-detail.jpeg" alt="本轮总消费与悬停明细" width="100%"><br>
+      <img src="https://raw.githubusercontent.com/gaishilaji/dsh-plugin-cost/main/docs/demo-turn-detail.jpeg" alt="本轮总消费与悬停明细" width="100%"><br>
       <sub>② 回复完成：消息旁显示 <b>本轮总消费</b>，悬停查看每次调用的明细</sub>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/demo-session-total.png" alt="会话总消费读数带" width="100%"><br>
+      <img src="https://raw.githubusercontent.com/gaishilaji/dsh-plugin-cost/main/docs/demo-session-total.png" alt="会话总消费读数带" width="100%"><br>
       <sub>③ 输入框下方常驻：<b>整场会话总消费</b>与输入/输出 token</sub>
     </td>
     <td align="center">
-      <img src="docs/demo-settings.png" alt="设置页预算配置卡片" width="100%"><br>
+      <img src="https://raw.githubusercontent.com/gaishilaji/dsh-plugin-cost/main/docs/demo-settings.png" alt="设置页预算配置卡片" width="100%"><br>
       <sub>④ 设置页插件卡片：开关预算提醒、调整每轮限额</sub>
     </td>
   </tr>
