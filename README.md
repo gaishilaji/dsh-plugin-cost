@@ -5,6 +5,8 @@
 # dsh-plugin-cost
 
 > 给 DeepSeek Harness 的聊天界面装一个「账单显示器」——**每条回复花了多少钱、整场对话花了多少钱、有没有超预算**，全部实时显示，不用再自己去查用量。插件设置里开启限额提示后，对话进行时会动态估算当前已经产生的消费。
+>
+> **版本要求**：`dsh-plugin-cost@0.2.x` 适配 **dsh 0.2.1 及以上（0.2.x）**；dsh 0.1.x 请继续使用插件 0.1.5。`package.json` 里用 `engines.dsh` 声明了兼容范围，版本不匹配时 dsh 会在启动时拒绝加载并给出提示。
 
 ## 🎬 效果演示
 
@@ -25,8 +27,8 @@
       <sub>③ 输入框下方常驻：<b>整场会话总消费</b>与输入/输出 token</sub>
     </td>
     <td align="center">
-      <img src="https://raw.githubusercontent.com/gaishilaji/dsh-plugin-cost/main/docs/demo-settings.png" alt="设置页预算配置卡片" width="100%"><br>
-      <sub>④ 设置页插件卡片：开关预算提醒、调整每轮限额</sub>
+      <b>④ 设置入口：Plugins → dsh-plugin-cost → 每轮消费限额</b><br>
+      <sub>0.2 起配置页随插件详情页展示，保存即写入当前 profile 的 <code>cordis.patch.yml</code>，无需重启</sub>
     </td>
   </tr>
 </table>
@@ -54,6 +56,12 @@ pnpm dsh web
 3. 打开聊天页随便聊一句 → 消息旁边和输入框下方就会显示费用。
 
 > 想先试 Git 版也可以：`pnpm dsh plugin --profile web add github:gaishilaji/dsh-plugin-cost`（首次安装会要求给该仓库的构建脚本授权，按提示操作）。
+
+### 从 dsh 0.1.x 升级
+
+1. 先把 dsh 升级到 0.2.1+，再重新安装/更新本插件（`dsh plugin --profile <name> add dsh-plugin-cost@0.2`，本地 link 安装则重新 `add` 一次让清单刷新）；
+2. 旧版写进 `settings.yaml` 的 `dsh-plugin-cost: { enabled, perTurn }` 段**不再读取**（0.2 起设置改为写 profile 的 `cordis.patch.yml`）。升级后在 **Plugins → dsh-plugin-cost** 里重新设置一次每轮限额即可；
+3. 旧版设置页只出现在 Settings 的 Plugins 分区；新版改在 **Plugins（插件管理）页 → 本包详情页**，配置项与行为不变。
 
 ## 🤔 常见问题
 
@@ -92,12 +100,14 @@ pnpm dsh web
 | `prices` | 上表 | `{ [model]: { cacheHit, cacheMiss, output } }`，高峰价（元/百万） |
 | `peakMode` | `auto` | `auto` 按北京时间分时；`peak` 恒高峰；`off-peak` 恒空闲 |
 | `defaultModel` | `deepseek-v4-flash` | 读不到模型名时的兜底 |
-| `budget.enabled` | `false` | 是否启用每轮消费限额（也可在 Web 设置卡改） |
+| `budget.enabled` | `false` | 是否启用每轮消费限额（也可在 Plugins 页改） |
 | `budget.perTurn` | `1` | 每轮消费上限（元） |
 | `budget.mode` | `'warn'` | 超限行为：`'warn'` 仅提示（`'ask'` 预留，未实现） |
 
-限额可双通道配置：`cordis.patch.yml` 的 `config.budget`（部署默认层）或 Web 设置页
-Plugins → 本插件设置卡（用户层，写入 `settings.yaml` 后覆盖默认，保存即生效）。
+限额可双通道配置：`cordis.patch.yml` 的 `config.budget`（组合层默认值）或
+**Plugins → dsh-plugin-cost** 的配置页（user 层，写入当前 profile 的 `cordis.patch.yml`）。
+`budget` 整体声明为 volatile：保存后 Loader 原地替换配置引用，宿主投影在下一次
+wire 视图里带上新限额——**无需重启**。与组合层相同的值会用 `unset` 清除 user 覆盖层。
 
 ## 项目结构
 
@@ -108,23 +118,28 @@ dsh-plugin-cost/
 ├── cordis.patch.yml      # bundle 配置层（价格表、峰谷、限额在此配置）
 ├── dev/cordis.yml        # 开发期 --patch overlay（只加载宿主半身）
 ├── src/
-│   ├── index.ts          # 宿主：cost 投影（计费 + turn/step + 当前轮 + 流式估算 + 限额下发/settings 注册）
+│   ├── index.ts          # 宿主：cost 投影（计费 + turn/step + 当前轮 + 限额/估算口径下发）
 │   └── client/
 │       ├── index.tsx     # 浏览器：input.dock 动态本轮/限额行 + assistant-actions 汇总芯片/浮层 + composer.dock 总消费
-│       └── settings-card.tsx  # 浏览器：Plugins → 配置 页的每轮限额设置卡
-└── test/smoke.mjs        # 峰谷/单价核对 + 宿主契约 + client 握手验证
+│       └── settings-card.tsx  # 浏览器：Plugins → 本包详情页的每轮限额配置页（configForms）
+└── test/smoke.mjs        # 峰谷/单价 + Config volatile + 投影折叠 + client 握手/槽位注册验证
 ```
 
 ## 工作原理（dsh 机制速览）
 
-- 宿主侧：从会话事件流按消息 id 折叠费用明细，注册为名为 `cost` 的 **projection**
-  （`ctx.sessionProjections.register`）；用 `turn/start`、`turn/end` 维护"当前轮"
-  （openTurn）；并把**当前生效的每轮限额**作为 wire 视图附加字段随帧下发；
-- 限额是**双份源**：`cordis.patch.yml` 的 `config.budget` 是默认/部署层；Web 设置里
-  本插件在 Plugins → 配置 页的设置卡（`settings.plugin.item`，键=`dsh-plugin-cost`）
-  通过 `settingsScope` 写 `settings.yaml` 的 user 层覆盖。宿主用
-  `installSettingsSection` 注册命名空间——保存后无需重启，下一轮/下一步生效
-  （settings 服务缺席的环境自动退化为纯 config）；
+- 宿主侧：从会话事件流（`assistant/message` 携带的 `usage`）按消息 id 折叠费用明细，
+  注册为名为 `cost` 的 **projection**（`ctx.sessionProjections.register`）；用
+  `turn/start`、`turn/end` 维护"当前轮"（openTurn）；并把**当前生效的每轮限额**
+  （读取 volatile 配置）与**流式估算口径**作为 wire 视图附加字段随帧下发；
+- 0.2 的会话事件变化：`assistant/chunk` 已移除，流式增量只作为 transient 的
+  `agent/assistant-stream` 帧存在，不进入会话日志。因此"进行中"的实时读数改由
+  **浏览器半身**读取 Chat 的 `useChat(...).legacy.partial`（当前流式步骤的
+  blocks），按 wire 下发的 `estimation`（字符/token 系数、输出单价、峰谷策略）
+  自行估算；每步 `assistant/message` 落账后即切换到精确 usage；
+- 设置：0.2 起 `installSettingsSection`/`settingsScope` 移除，插件配置由 Loader
+  条目的 Config schema 投影。本包把 `budget` 声明为 volatile 字段，配置页通过
+  `ctx.configForms.get('cost')` 读写（`plugins.bundle.config` 槽位，键 = 包名），
+  保存由 ConfigEditor 写入 profile 的 `cordis.patch.yml`；
 - 浏览器侧：`useProjection('cost')` 订阅宿主推送，渲染三处——
   `conversation.input.dock`（运行中本轮/限额动态行）、
   `conversation.chat.assistant-actions`（每轮总消费芯片与 hover 明细）、
@@ -136,6 +151,7 @@ dsh-plugin-cost/
 ```sh
 pnpm install
 pnpm typecheck && pnpm test     # test = build + smoke（含官网价格核对断言）
+# 注：dsh 0.2 的类型图较大，typecheck 脚本已固定 8GB 堆；如仍 OOM 可调大该数值
 ```
 
 本地快速试宿主半身（在 dsh checkout 根）：
@@ -157,6 +173,7 @@ pnpm dsh web
 - 费用按 `assistant/message` 的 usage 计算：一次请求（step）一条消息；
   同一会话重放（刷新/恢复）由 projection 缓存保证不重复计费；
 - 每条消息的费用在消息出现后**即刻**显示（投影帧随事件流推送，可能比消息渲染晚一拍）；
-- 运行中的"流式估算"是**近似值**：按已流出的字符数 × 约 3.2 字符/token × 输出单价推算，
-  只覆盖输出侧（思考/正文/工具参数），并按 `defaultModel` 计价（流式中模型名未知）；
-  每步完成即以真实 usage 校正——**所有最终显示（每轮芯片、浮层、总消费）一律为精确值**。
+- 运行中的"流式估算"是**近似值**：浏览器按当前 partial 已流出的字符数 × 约 3.2 字符/token
+  × 输出单价推算，只覆盖输出侧（思考/正文/工具参数），并按 `defaultModel` 计价
+  （流式中模型名未知）；每步完成即以真实 usage 校正——**所有最终显示（每轮芯片、
+  浮层、总消费）一律为精确值**。
