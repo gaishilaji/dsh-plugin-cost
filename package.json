@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-cost",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "DeepSeek Harness cost tracker: per-turn & total token usage and billing (DeepSeek pricing, peak/off-peak aware), rendered in the chat UI.",
   "type": "module",
   "main": "lib/index.js",
@@ -25,12 +25,18 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
   },
   "scripts": {
     "build": "tsdown",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc --noEmit",
     "clean": "rm -rf lib",
     "smoke": "node test/smoke.mjs",
     "test": "pnpm build && node test/smoke.mjs",
@@ -56,20 +62,19 @@
   },
   "homepage": "https://github.com/gaishilaji/dsh-plugin-cost",
   "dependencies": {
-    "@deepseek-ai/dsh-settings": "0.1.1-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "zod": "^4.4.3"
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-session-projection": "^0.1.1-rc.1",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-session-projection": ">=0.2.1-rc.2 <0.3.0",
     "react": "^18.0.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-session": "0.1.1-rc.1",
-    "@deepseek-ai/dsh-session-projection": "0.1.1-rc.1",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
     "@types/node": "^22.20.0",
     "@types/react": "^18.3.0",
     "tsdown": "^0.22.2",

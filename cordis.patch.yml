@@ -10,6 +10,9 @@
 #
 # 价格默认取自官网《模型 & 价格》的高峰价（元/百万 token），空闲时段自动半价；
 # 官网调价后，只需改下面 config.prices 的数值，无需改代码。
+#
+# budget 是 volatile 配置段：Plugins 页（本包详情页）保存后由 Loader 原地更新，
+# 无需重启；行 id `cost` 同时是设置页读写的命名空间。
 - insert:
     - id: cost
       name: 'dsh-plugin-cost'
@@ -29,3 +32,7 @@
             output: 9.0
         peakMode: auto
         defaultModel: deepseek-v4-flash
+        budget:
+          enabled: false
+          perTurn: 1
+          mode: warn

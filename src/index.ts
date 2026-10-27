@@ -15,12 +15,18 @@
  *     空闲时段为高峰价的一半。按每条消息发生时刻（event.time）判断，可重放、幂等。
  *   - 单价做成 config（无硬编码部署参数），价格变动只改 cordis.yml 即可。
  *
- * @module dsh-plugin-cost
+ * dsh 0.2.x 适配要点：
+ *   - 会话事件里 `assistant/chunk` 已移除，assistant/message 内嵌 `stream`。
+ *     宿主只折叠已落账的 usage；"进行中"的流式估算改由浏览器半身读取
+ *     useChat 的 partial（transient 流帧），宿主通过 wire 的 estimation 下发
+ *     单价/峰谷口径。
+ *   - 设置不再走 `installSettingsSection`（0.2 起该 API 移除）。`budget` 配置段
+ *     声明为 volatile：Web 插件页保存后由 Loader 原地更新配置引用，无需重启；
+ *     投影 wire 视图每次产出时读取当前值下发。
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { z } from 'zod'
 // Type-only：让 SessionProjectionStateMap / SessionProjectionMap 认识 'cost' 键
 // （编译期擦除，不产生运行时依赖）。
@@ -57,19 +63,26 @@ export interface ModelPrice {
   output: number
 }
 
+/** 峰谷策略：auto=按事件发生时刻的北京时间自动判断；peak=恒按高峰；off-peak=恒按空闲。 */
+export type PeakMode = 'auto' | 'peak' | 'off-peak'
+
 /** 插件配置：价格可被 cordis.yml 覆盖（价格变动无需改代码）。 */
-export interface Config {
-  /** 按模型名 → 高峰价。key 与 assistant message 的 model 匹配。 */
-  prices: Record<string, ModelPrice>
-  /** 峰谷策略：auto=按事件发生时刻的北京时间自动判断；peak=恒按高峰；off-peak=恒按空闲。 */
-  peakMode: 'auto' | 'peak' | 'off-peak'
-  /** message 未带 model 时兜底使用的模型名。 */
-  defaultModel: string
-  /** 每轮消费限额（默认关闭；可在 Web 设置里改，双份源：schema 默认 + user 层覆盖）。 */
-  budget: BudgetConfig
+export interface Config extends ProjectionConfig {
+  /** 每轮消费限额。volatile：Web 插件页保存后原地生效，无需重启。 */
+  budget: Volatile<BudgetConfig>
 }
 
-/** 每轮消费限额配置。mode 保留给后续的"超限询问"档位；当前实现只走 'warn'。 */
+/** 投影折叠只依赖这三项（测试可以只传这些）。 */
+export interface ProjectionConfig {
+  /** 按模型名 → 高峰价。key 与 assistant message 的 model 匹配。 */
+  prices: Record<string, ModelPrice>
+  /** 峰谷策略。 */
+  peakMode: PeakMode
+  /** message 未带 model 时兜底使用的模型名。 */
+  defaultModel: string
+}
+
+/** 每轮消费限额配置（整体作为 live 字段：volatile 引用读取当前生效值）。 */
 export interface BudgetConfig {
   /** 是否启用每轮限额。 */
   enabled: boolean
@@ -80,23 +93,24 @@ export interface BudgetConfig {
 }
 
 /** 下发到浏览器的限额视图（wire view 附加字段，读取当前生效值）。 */
-export interface BudgetView extends BudgetConfig {}
-
-/** Web 设置 section 的扁平字段（settingsScope 只支持单段字段路径）。 */
-export interface BudgetSection {
+export interface BudgetView {
   enabled: boolean
   perTurn: number
+  mode: 'warn' | 'ask'
 }
 
-/** Web 设置里限额的命名空间。 */
-export const COST_NS = settingsNamespace('dsh-plugin-cost')
-
-const budgetSectionSchema = Schema.object({
+// 整体声明为 volatile（而不是逐字段）：Web 插件页把 budget 当成一个可 live 编辑的
+// 配置段，Loader 原地替换整段引用，宿主投影读取时拿到的就是最新限额。
+const budgetSchema = Schema.object({
   enabled: Schema.boolean().default(false),
   perTurn: Schema.number().min(0).default(1),
-})
+  mode: Schema.union(['warn', 'ask']).default('warn'),
+}).default({ enabled: false, perTurn: 1, mode: 'warn' }).volatile()
 
-export const Config: Schema<Config> = Schema.object({
+// schemastery 对 `.volatile()` 的泛型 Mode 推导在“对象字段 + default”组合下会退化成
+// 联合类型（boolean | Volatile<boolean>），因此这里以 Config 接口为准做一次断言；
+// 运行时仍是同一个 Schema 对象，Loader 只读取它的 ~standard/toJSON。
+export const Config = Schema.object({
   prices: Schema.dict(Schema.object({
     cacheHit: Schema.number().min(0),
     cacheMiss: Schema.number().min(0),
@@ -104,12 +118,8 @@ export const Config: Schema<Config> = Schema.object({
   })).default(DEFAULT_PRICES),
   peakMode: Schema.union(['auto', 'peak', 'off-peak']).default('auto'),
   defaultModel: Schema.string().default('deepseek-v4-flash'),
-  budget: Schema.object({
-    enabled: Schema.boolean().default(false),
-    perTurn: Schema.number().min(0).default(1),
-    mode: Schema.union(['warn', 'ask']).default('warn'),
-  }).default({ enabled: false, perTurn: 1, mode: 'warn' }),
-})
+  budget: budgetSchema,
+}) as unknown as Schema<Config>
 
 // ============================================================================
 // 峰谷判断与费用计算（导出为纯函数，smoke 测试直接验证）
@@ -219,20 +229,16 @@ export interface CostState {
   messages: Record<string, CostMessage>
   /** 当前打开（进行中）的轮次；空闲为 null。由 turn/start、turn/end 维护。 */
   openTurn: number | null
-  /** 当前流式步骤的输出估算（usage 完成前，浏览器据此实时动起来）。 */
-  live: CostLive | null
 }
 
-/** 流式步骤的估算：按已流出的字符数 × 字符→token 系数 × 输出单价。 */
-export interface CostLive {
-  /** 所属轮次。 */
-  turn: number
-  /** 所属步序。 */
-  step: number
-  /** 已流式输出的字符数（reasoning + text + tool 参数）。 */
-  chars: number
-  /** 估算输出费用（元）；assistant/message 落账后以真实 usage 为准。 */
-  cost: number
+/** 流式估算口径：浏览器半身用 Chat 的 partial 字符数 × 该口径自行估算。 */
+export interface CostEstimation {
+  /** 流式估算的字符→输出 token 近似系数（离线校准，中英混排约 3.2 字/token）。 */
+  charsPerToken: number
+  /** 估算用的输出单价（元/百万 token，defaultModel 的高峰价）。 */
+  outputPrice: number
+  /** 峰谷策略（浏览器按发生时刻判断）。 */
+  peakMode: PeakMode
 }
 
 /** 流式估算的字符→输出 token 近似系数（离线校准，中英混排约 3.2 字/token）。 */
@@ -262,36 +268,32 @@ const costTotalsSchema = z.object({
   messages: z.number().int().nonnegative(),
 }).strict()
 
-const costLiveSchema = z.object({
-  turn: z.number().int().nonnegative(),
-  step: z.number().int().nonnegative(),
-  chars: z.number().int().nonnegative(),
-  cost: z.number().nonnegative(),
-}).strict()
-
 const costStateSchema = z.object({
   totals: costTotalsSchema,
   messages: z.record(z.string(), costMessageSchema),
   openTurn: z.number().int().nonnegative().nullable(),
-  live: costLiveSchema.nullable(),
 }).strict()
 
 type CostStateInferred = z.infer<typeof costStateSchema>
 
-/** wire 视图 = 宿主状态 + 当前生效的限额（随设置变更即时刷新）。 */
+/** wire 视图 = 宿主状态 + 当前生效的限额 + 流式估算口径。 */
 const costViewSchema = z.object({
   totals: costTotalsSchema,
   messages: z.record(z.string(), costMessageSchema),
   openTurn: z.number().int().nonnegative().nullable(),
-  live: costLiveSchema.nullable(),
   budget: z.object({
     enabled: z.boolean(),
     perTurn: z.number().nonnegative(),
-    mode: z.string(),
+    mode: z.enum(['warn', 'ask']),
+  }).strict(),
+  estimation: z.object({
+    charsPerToken: z.number().positive(),
+    outputPrice: z.number().nonnegative(),
+    peakMode: z.enum(['auto', 'peak', 'off-peak']),
   }).strict(),
 }).strict()
 
-/** 浏览器侧拿到的完整视图类型（状态 + 当前限额）。 */
+/** 浏览器侧拿到的完整视图类型（状态 + 当前限额 + 估算口径）。 */
 export type CostView = z.infer<typeof costViewSchema>
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -303,55 +305,44 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-/** 组装投影单元：apply 为纯 fold，闭包只引用启动期确定的 config。
- *  `readBudget` 在每次产出 wire 视图时读取【当前生效】的限额
- *  （Web 设置保存后无需重启即反映到浏览器）。导出以便测试。 */
-export function makeProjection(config: Config, readBudget: () => BudgetView = () => config.budget) {
+/**
+ * 组装投影单元：apply 为纯 fold，闭包只引用启动期确定的 config。
+ * `readBudget` 在每次产出 wire 视图时读取【当前生效】的限额
+ * （Web 插件页保存后无需重启即反映到浏览器）。导出以便测试。
+ */
+export function makeProjection(
+  config: ProjectionConfig,
+  readBudget: () => BudgetView = () => ({ enabled: false, perTurn: 1, mode: 'warn' }),
+) {
   const fallbackModel = config.defaultModel
   const isPeak = (time: number): boolean => {
     if (config.peakMode === 'peak') return true
     if (config.peakMode === 'off-peak') return false
     return isPeakHour(time)
   }
-  // 估算用的输出单价：流式中模型名未知，按 defaultModel（fallback）计价，
-  // 步骤完成拿到真实 usage 后由精确值覆盖，因此只影响"进行中"的观感。
-  const estimateOutputPrice = config.prices[fallbackModel]?.output ?? 0
+  // 估算口径只依赖启动期配置（非 volatile），可安全复用同一对象。
+  const estimation: CostEstimation = {
+    charsPerToken: OUTPUT_CHARS_PER_TOKEN,
+    outputPrice: config.prices[fallbackModel]?.output ?? 0,
+    peakMode: config.peakMode,
+  }
 
   return {
     key: 'cost',
-    stateVersion: 4,
+    stateVersion: 5,
     stateSchema: costStateSchema,
-    init: (): CostStateInferred => ({ totals: emptyTotals(), messages: {}, openTurn: null, live: null }),
+    init: (): CostStateInferred => ({ totals: emptyTotals(), messages: {}, openTurn: null }),
     apply: (state: CostStateInferred, event: SessionEvent): CostStateInferred => {
       // 轮次边界：turn/start 打开当前轮、turn/end 关闭。维护 openTurn 除了
       // 给"本轮"显示提供语义，也让轮次切换时产生新的状态引用、从而把
       // 最新的限额（view 附加字段）随帧推给浏览器。
       if (event.type === 'turn/start') {
         if (state.openTurn === event.data.turn) return state
-        return { ...state, openTurn: event.data.turn, live: null }
+        return { ...state, openTurn: event.data.turn }
       }
       if (event.type === 'turn/end') {
         if (state.openTurn !== event.data.turn) return state
-        return { ...state, openTurn: null, live: null }
-      }
-
-      // 流式估算：usage 只在步骤完成时落账，但思考/正文/工具参数逐块流式到达
-      // （assistant/chunk 的 reasoning-delta / text-delta / tool-call-delta）。
-      // 按累计字符数 × 字符→token 系数 × 输出单价得出"进行中步骤"的估算输出费，
-      // 让运行中的读数随思考实时上涨；assistant/message 落账后用真实 usage 顶替
-      // （见下）。每块 delta 一次小帧，与应用自身的流式转发同量级。
-      const streamed = streamedChars(event)
-      if (streamed !== null) {
-        if (streamed.n <= 0) return state
-        const open = state.live
-        const same = open !== null && open.turn === streamed.turn && open.step === streamed.step
-        const chars = (same ? open.chars : 0) + streamed.n
-        const rate = isPeak(event.time) ? 1 : 0.5
-        const cost = chars / OUTPUT_CHARS_PER_TOKEN / 1e6 * estimateOutputPrice * rate
-        return {
-          ...state,
-          live: { turn: streamed.turn, step: streamed.step, chars, cost },
-        }
+        return { ...state, openTurn: null }
       }
 
       if (event.type !== 'assistant/message' || event.data.usage === undefined) return state
@@ -375,89 +366,42 @@ export function makeProjection(config: Config, readBudget: () => BudgetView = ()
       totals.cost += cost
       // 内容形状：纯工具调用步骤（无文本）没有可见气泡，但同样按 usage 计费。
       // 浏览器端按 (turn, step) 把整轮步骤聚合成"本轮 N 次调用"并展开详情。
-      const content = event.data.message.content as
-        | readonly { type?: string; text?: unknown; name?: unknown }[]
-        | undefined
+      const content = event.data.message.content
       const tools: string[] = []
       let text = false
       for (const part of content ?? []) {
         if (part?.type === 'tool-call' && typeof part.name === 'string') tools.push(part.name)
         else if (part?.type === 'text' && typeof part.text === 'string' && part.text.trim() !== '') text = true
       }
-      const turn = (event.data as { turn?: number }).turn ?? 0
-      const step = (event.data as { step?: number }).step ?? 0
       return {
         ...state,
         totals,
-        // 该步已落账：清除同一步的流式估算（真实 usage 入账）。
-        live: state.live !== null && state.live.turn === turn && state.live.step === step
-          ? null
-          : state.live,
         messages: {
           ...state.messages,
           [messageId]: {
             input, cacheRead, output, cost, peak, model,
-            turn, step, time: event.time, text, tools,
+            turn: event.data.turn,
+            step: event.data.step,
+            time: event.time,
+            text,
+            tools,
           },
         },
       }
     },
     wire: {
       viewSchema: costViewSchema,
-      view: (state): CostView => ({ ...state, budget: readBudget() }),
+      view: (state): CostView => ({ ...state, budget: readBudget(), estimation }),
     },
   } satisfies ProjectionDefinition<'cost', CostStateInferred>
 }
 
-/**
- * 从流式事件提取 (turn, step, 字符增量)。非流式/非 delta 事件返回 null。
- * 实时与重放吃的是同一种形态：每条 `assistant/chunk` 携带一个 chunk，其中
- * reasoning-delta / text-delta / tool-call-delta 各携带一小段输出
- * （text / argumentsDelta）。存储层会把连续 delta 打包成 chunk 行、重放时再
- * 还原回本形态（见 core/session 的 chunk-rows），因此折叠只需处理原始事件。
- */
-function streamedChars(event: SessionEvent): { turn: number; step: number; n: number } | null {
-  if (event.type !== 'assistant/chunk') return null
-  const raw = event as unknown as {
-    data?: {
-      turn?: number
-      step?: number
-      chunk?: { type?: string; text?: string; argumentsDelta?: string }
-    }
-  }
-  const chunk = raw.data?.chunk
-  if (chunk === undefined) return null
-  const kind = chunk.type
-  if (kind !== 'reasoning-delta' && kind !== 'text-delta' && kind !== 'tool-call-delta') {
-    return null
-  }
-  const piece = kind === 'tool-call-delta' ? chunk.argumentsDelta : chunk.text
-  if (piece === undefined) return null
-  return { turn: raw.data?.turn ?? 0, step: raw.data?.step ?? 0, n: piece.length }
-}
-
-/** 插件主体：注册投影 + 把限额接入 Web 设置（settings 服务缺席时自动跳过）。 */
-export function apply(ctx: Context, config: Config) {
+/** 插件主体：注册投影（限额字段是 volatile，由 Loader 原地更新）。 */
+export function apply(ctx: Context, config: Config): void {
   console.log('[dsh-plugin-cost] 插件已加载，费用追踪开始')
-  // 当前生效的限额：初始取 composition entry（cordis.patch.yml 的 config.budget）；
-  // settings 服务存在时，注册 section 后由 resolved scope（base + user 层）驱动。
-  const current: { budget: BudgetView } = {
-    budget: { ...config.budget, mode: 'warn' },
+  const readBudget = (): BudgetView => {
+    const budget = config.budget.get()
+    return { enabled: budget.enabled, perTurn: budget.perTurn, mode: budget.mode }
   }
-  let sectionSource: (() => BudgetSection) | null = null
-  installSettingsSection(ctx, COST_NS, budgetSectionSchema, {
-    enabled: config.budget.enabled,
-    perTurn: config.budget.perTurn,
-  }, {
-    setSource: (thunk) => { sectionSource = thunk },
-    onChange: () => {
-      const section = sectionSource === null ? null : sectionSource()
-      if (section !== null) {
-        // attach/detach/每次设置写入触发：用 resolved scope（user 层覆盖 base）
-        // 更新投影视图下发用的当前限额。
-        current.budget = { enabled: section.enabled, perTurn: section.perTurn, mode: 'warn' }
-      }
-    },
-  })
-  ctx.sessionProjections.register(makeProjection(config, () => current.budget))
+  ctx.sessionProjections.register(makeProjection(config, readBudget))
 }
