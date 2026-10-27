@@ -2,35 +2,37 @@
  * dsh-plugin-cost —— DeepSeek 对话消费追踪（浏览器半身）
  *
  * 读取宿主侧 projection 'cost'（见 src/index.ts）的 wire 视图
- * （宿主状态 + 当前生效的每轮限额 budget），渲染三处：
+ * （宿主状态 + 当前生效的每轮限额 budget + 流式估算口径 estimation），渲染三处：
  *
  *   1. conversation.input.dock —— 输入框上方整行区（deep-diving 所在聊天区
  *      下方、输入卡上方，运行中用户视线常驻区域）：agent 运行中显示动态
  *      `本轮 ¥0.34 / 限额 ¥1.00`，每完成一步步进更新；超限变红 + `已超本轮限额`。
- *      对话结束（空闲）自动隐藏。
+ *      对话结束（空闲）自动隐藏。进行中的估算来自 Chat 提供的 partial
+ *      （0.2 起流式帧是 transient 的 agent/assistant-stream，不再写入会话日志，
+ *      因此由浏览器侧按 estimation 口径自行估算）。
  *   2. conversation.chat.assistant-actions —— 每轮结束的 actions 条内的
  *      `本轮总消费 ¥X` 汇总芯片（含纯工具调用步骤；hover 弹出明细浮层：
  *      对话费用 + 逐条调用详情 + 本轮合计）。该轮超限时芯片标红，
  *      浮层里追加"已超本轮限额"提示行。浮层可悬停，不会移出即消失。
  *   3. conversation.composer.dock —— 输入框下方总消费读数带（不变）。
  *
- * 每轮限额（budget）是双份源：cordis.patch.yml 的 config.budget 做默认/部署层，
- * Web 设置里本插件的设置卡（settings.plugin.item）写 settings.yaml user 层
- * 覆盖，宿主随投影视图下发当前生效值（设置保存后下一轮/下一步生效）。
+ * 每轮限额（budget）是 live 配置：dsh 0.2 起插件设置由 Loader 条目的 Config
+ * schema 投影，Web 插件页通过 configForms 写入该条目（volatile 字段原地生效），
+ * 宿主在下一次投影 wire 视图里带上当前值。
  *
- * 槽位注入的标准套件（PropsRuntime）会提供 useProjection / useSession /
- * sessionId；本组件不接触 ctx，数据全部来自 props。
+ * 槽位注入的标准套件（PropsRuntime）会提供 useProjection / useSession / useChat /
+ * sessionId；本组件不接触 ctx 数据，展示数据全部来自 props。
  *
  * @module dsh-plugin-cost/client
  */
 
 import { memo, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { registerBudgetSettingsCard } from './settings-card.tsx'
+import { BudgetSettingsPage } from './settings-card.tsx'
 
 /** 浏览器侧插件同样声明依赖（服务名 'slots'）。 */
 export const inject = ['slots']
 
-/** 宿主投影 'cost' 的 wire 视图（= 状态 + 当前限额，见 src/index.ts）。 */
+/** 宿主投影 'cost' 的 wire 视图（= 状态 + 当前限额 + 估算口径，见 src/index.ts）。 */
 interface CostMessage {
   input: number
   cacheRead: number
@@ -55,17 +57,27 @@ interface CostView {
   }
   messages: Record<string, CostMessage>
   openTurn: number | null
-  live: {
-    turn: number
-    step: number
-    chars: number
-    cost: number
-  } | null
   budget: {
     enabled: boolean
     perTurn: number
     mode: string
   }
+  estimation: {
+    charsPerToken: number
+    outputPrice: number
+    peakMode: 'auto' | 'peak' | 'off-peak'
+  }
+}
+
+/** Chat 的进行中助手输出（useChat 的 legacy.partial，与宿主 0.2 的流式帧同形）。 */
+interface PartialAssistantLike {
+  turn: number
+  step: number
+  blocks: readonly {
+    kind: string
+    text?: string
+    argsRaw?: string
+  }[]
 }
 
 const fmt = (n: number): string => n.toLocaleString('zh-CN')
@@ -82,14 +94,16 @@ function formatYuan(n: number): string {
   return `¥${n.toFixed(2)}`
 }
 
-/** 主题里没有 danger 文本 token 时的兜底红。 */
-const DANGER = 'var(--dsw-alias-danger, #e5484d)'
+/** 主题 danger 文本色（0.2 的 state-error-primary；旧版本/缺省时逐级兜底）。 */
+const DANGER = 'var(--dsw-alias-state-error-primary, var(--dsw-alias-danger, #e5484d))'
 
 /** 最小 props 类型（正式项目可用 PropsRuntime<'...'> 推导完整套件）。 */
 interface SlotProps {
   useProjection: (key: string) => unknown
   /** session 标准套件提供的钩子（仅按需读取 running 等快照字段）。 */
   useSession?: (selector: (snapshot: Record<string, unknown>) => unknown) => unknown
+  /** session 标准套件提供的 Chat 选择器（读取进行中的 partial 流）。 */
+  useChat?: (selector: (snapshot: Record<string, unknown>) => unknown) => unknown
 }
 
 interface AssistantActionsProps extends SlotProps {
@@ -112,18 +126,56 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+/**
+ * 是否处于高峰时段：北京时间周一至周五 9:00–12:00、14:00–18:00。
+ * 与宿主 src/index.ts 的同名判断保持一致；仅用于"进行中"的流式估算，
+ * 最终落账金额始终由宿主按事件发生时刻精确计算。
+ */
+function isPeakHour(date: Date = new Date()): boolean {
+  const bj = new Date(date.getTime() + 8 * 3600_000)
+  const day = bj.getUTCDay()
+  if (day === 0 || day === 6) return false
+  const h = bj.getUTCHours()
+  return (h >= 9 && h < 12) || (h >= 14 && h < 18)
+}
+
+/** 进行中步骤已流出的字符数（正文 + 思考 + 工具参数），用于估算输出 token。 */
+function partialChars(partial: PartialAssistantLike | null | undefined): number {
+  if (partial === null || partial === undefined) return 0
+  let chars = 0
+  for (const block of partial.blocks) {
+    if (block.kind === 'tool-call') chars += block.argsRaw?.length ?? 0
+    else if (block.kind === 'text' || block.kind === 'reasoning') chars += block.text?.length ?? 0
+  }
+  return chars
+}
+
+/** 按 estimation 口径估算进行中步骤的输出费用（元）。 */
+function estimateLiveCost(partial: PartialAssistantLike | null | undefined, estimation: CostView['estimation']): number {
+  const chars = partialChars(partial)
+  if (chars <= 0) return 0
+  const peak = estimation.peakMode === 'peak'
+    || (estimation.peakMode === 'auto' && isPeakHour())
+  const rate = peak ? 1 : 0.5
+  return chars / estimation.charsPerToken / 1e6 * estimation.outputPrice * rate
+}
+
 // ---------------------------------------------------------------------------
 // 展示位 1：input.dock 动态"本轮消费/限额"行（agent 运行中显示，空闲隐藏）
 // ---------------------------------------------------------------------------
 
-export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useSession }: SlotProps) {
+export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useSession, useChat }: SlotProps) {
   const running = useSession?.(s => s.running) === true
   const view = useProjection('cost') as CostView | undefined
+  const partial = useChat?.(s => (s as { legacy?: { partial?: PartialAssistantLike | null } }).legacy?.partial) as
+    | PartialAssistantLike
+    | null
+    | undefined
   // 运行中 + 已启用限额才显示；空闲自动隐藏（本区域无内容时不占位）。
   if (!running || view === undefined || !view.budget.enabled) return null
   // 当前轮：优先用宿主维护的 openTurn（turn/start 到 turn/end 之间）；
-  // 兜底取已入账消息的最新轮。
-  let turn = view.openTurn
+  // 其次进行中的 partial；兜底取已入账消息的最新轮。
+  let turn = view.openTurn ?? partial?.turn ?? null
   if (turn === null) {
     for (const m of Object.values(view.messages)) {
       if (turn === null || m.turn > turn) turn = m.turn
@@ -131,15 +183,17 @@ export const LiveBudgetLine = memo(function LiveBudgetLine({ useProjection, useS
     if (turn === null) return null
   }
   // 该轮已入账消息的费用合计（agent 每完成一步更新一次，步进式增长）+
-  // 当前流式步骤的输出估算（宿主按已流出的字符估算，assistant/message 落账
+  // 当前流式步骤的估算（浏览器按已流出的字符数估算，assistant/message 落账
   // 后由真实 usage 顶替）。估算只影响运行中的读数，最终显示都用精确值。
   let spend = 0
   for (const m of Object.values(view.messages)) {
     if (m.turn === turn) spend += m.cost
   }
-  const live = view.live
-  const estimating = live !== null && live.turn === turn && live.cost > 0
-  if (estimating) spend += live.cost
+  const live = partial !== null && partial !== undefined && partial.turn === turn
+    ? estimateLiveCost(partial, view.estimation)
+    : 0
+  const estimating = live > 0
+  if (estimating) spend += live
   const over = spend > view.budget.perTurn
   const color = over ? DANGER : 'var(--dsw-alias-label-secondary, #8a8f98)'
   // 流式估算的增量是万分位级别：两位小数会一直显示 ¥0.00，观感断裂。
@@ -420,7 +474,7 @@ export const CostTotalBar = memo(function CostTotalBar({ useProjection }: SlotPr
 
 /** 浏览器侧 slots API 的最小类型（正式项目按官方类型声明）。 */
 interface Slots {
-  inject: (name: string, register: () => unknown) => void
+  inject: (name: string, register: () => unknown) => unknown
   register: (options: {
     name: string
     key?: string
@@ -430,16 +484,27 @@ interface Slots {
   }, component: unknown) => unknown
 }
 
+/** 本插件宿主条目的 id（cordis.patch.yml 里 `- id: cost`），也是设置命名空间。 */
+const COST_ENTRY_ID = 'cost'
+/** 本包名，作为 bundle 配置页的 key。 */
+const PACKAGE_NAME = 'dsh-plugin-cost'
+
 /** 客户端 ctx 的最小形状（只用到 slots + 可选服务注入）。 */
 interface ClientCtxLike {
-  slots: unknown
+  slots: Slots
   get?: (name: string) => unknown
   /** cordis 服务注入：服务就绪后调用回调（浏览器插件的 apply 顺序无约束）。 */
-  inject?: (services: readonly string[], callback: (sctx: Record<string, unknown>) => unknown) => unknown
+  inject?: (services: readonly string[], callback: (sctx: ClientCtxLike & {
+    configForms: {
+      get(entryId: string): unknown
+      whileServed(namespaces: readonly string[], register: () => unknown): () => void
+    }
+    effect?: (callback: () => unknown) => unknown
+  }) => unknown) => unknown
 }
 
 export function apply(ctx: ClientCtxLike): void {
-  const slots = ctx.slots as Slots
+  const slots = ctx.slots
 
   // 输入框上方整行区：运行中动态"本轮消费/限额"行。
   slots.inject('conversation.input.dock', () =>
@@ -469,32 +534,22 @@ export function apply(ctx: ClientCtxLike): void {
     }, CostTotalBar),
   )
 
-  // Web 设置卡。settingsScope 由其它浏览器插件（ui-settings）提供，而浏览器
-  // 插件的 apply 顺序无约束：若本插件先于它 apply，一次性 ctx.get 会拿到
-  // undefined 导致卡片永不注册。因此：
-  //   1) 先尝试立即拿服务（已就绪则直接注册）；
-  //   2) 再走 ctx.inject(['settingsScope'], …) 等服务就绪补注册（幂等：仅一次）。
-  // 服务始终缺席（如 headless 部署）时静默跳过，不影响上面的展示。
-  let registered = false
-  const tryRegister = (scopeService: unknown): void => {
-    if (registered) return
-    try {
-      if (registerBudgetSettingsCard(slots, scopeService)) registered = true
-    } catch (error) {
-      console.warn('[dsh-plugin-cost] 设置卡注册失败（不影响费用展示）', error)
-    }
-  }
+  // Web 设置页：dsh 0.2 起第三方插件的配置页注册进 `plugins.bundle.config`
+  // （key = 包名），数据通过 `configForms` 读写本插件宿主条目（entry id = cost）。
+  // 浏览器插件的 apply 顺序无约束：用 ctx.inject 等服务就绪后再注册；
+  // 宿主没有投影出该命名空间（例如旧版 dsh）时静默跳过，不影响费用展示。
   try {
-    if (typeof ctx.inject === 'function') {
-      try {
-        ctx.inject(['settingsScope'], sctx => { tryRegister(sctx?.settingsScope) })
-      } catch {
-        // 注入不可用（旧客户端）→ 退回一次性 get
-        tryRegister(ctx.get?.('settingsScope'))
-      }
-    } else {
-      tryRegister(ctx.get?.('settingsScope'))
-    }
+    ctx.inject?.(['configForms'], (sctx) => {
+      const configForms = sctx.configForms
+      const form = configForms.get(COST_ENTRY_ID)
+      return sctx.effect?.(() => configForms.whileServed([COST_ENTRY_ID], () =>
+        slots.inject('plugins.bundle.config', () => slots.register({
+          name: 'plugins.bundle.config',
+          key: PACKAGE_NAME,
+          inject: () => ({ budgetForm: form }),
+        }, BudgetSettingsPage)),
+      ))
+    })
   } catch (error) {
     console.warn('[dsh-plugin-cost] 设置卡注册异常（不影响费用展示）', error)
   }
